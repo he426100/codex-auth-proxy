@@ -20,18 +20,17 @@ final class ImportCommand extends ProxyCommand
     protected function configure(): void
     {
         $this
-            ->addArgument('name', InputArgument::REQUIRED, 'Account name')
+            ->addArgument('name', InputArgument::OPTIONAL, 'Account name')
             ->addOption('from', null, InputOption::VALUE_REQUIRED, 'Path to the official Codex auth.json');
         $this->addPathOptions();
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
-        $name = (string) $input->getArgument('name');
+        $name = $this->stringArgument($input, 'name');
+        $config = $this->appConfig($input);
         $from = $this->stringOption($input, 'from');
-        if ($from === null) {
-            throw new InvalidArgumentException('Missing --from=<path>');
-        }
+        $from ??= $config->home . '/.codex/auth.json';
 
         $raw = file_get_contents($from);
         if ($raw === false) {
@@ -45,7 +44,12 @@ final class ImportCommand extends ProxyCommand
 
         $payload = (new CodexAuthImporter())->import($decoded, $name);
         $account = (new AccountFileValidator())->validate($payload);
-        $path = (new AccountRepository($this->appConfig($input)->accountsDir))->save($name, $account);
+        $repository = new AccountRepository($config->accountsDir);
+        if ($name === null) {
+            $name = $repository->resolveImplicitName($account->name(), $account->accountId());
+            $account = $account->withName($name);
+        }
+        $path = $repository->save($name, $account);
         $output->writeln("Imported {$account->name()} to {$path}");
 
         return self::SUCCESS;

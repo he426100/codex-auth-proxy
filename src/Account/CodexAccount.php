@@ -58,6 +58,20 @@ final class CodexAccount
         return $this->sourcePath;
     }
 
+    public function withName(string $name): self
+    {
+        return new self(
+            $name,
+            $this->accountId,
+            $this->email,
+            $this->idToken,
+            $this->accessToken,
+            $this->refreshToken,
+            $this->enabled,
+            $this->sourcePath,
+        );
+    }
+
     public function withTokens(string $idToken, string $accessToken, string $refreshToken): self
     {
         return new self(

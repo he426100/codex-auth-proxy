@@ -31,7 +31,7 @@ final class LoginCommand extends ProxyCommand
     protected function configure(): void
     {
         $this
-            ->addArgument('name', InputArgument::REQUIRED, 'Account name')
+            ->addArgument('name', InputArgument::OPTIONAL, 'Account name')
             ->addOption('callback-host', null, InputOption::VALUE_REQUIRED, 'OAuth callback host')
             ->addOption('callback-port', null, InputOption::VALUE_REQUIRED, 'OAuth callback port')
             ->addOption('callback-timeout', null, InputOption::VALUE_REQUIRED, 'OAuth callback timeout seconds');
@@ -40,7 +40,7 @@ final class LoginCommand extends ProxyCommand
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
-        $name = (string) $input->getArgument('name');
+        $name = $this->stringArgument($input, 'name');
         $config = $this->appConfig($input);
         $pkce = PkcePair::generate();
         $state = bin2hex(random_bytes(16));
@@ -65,7 +65,12 @@ final class LoginCommand extends ProxyCommand
             'tokens' => $tokens,
         ], $name);
         $account = (new AccountFileValidator())->validate($payload);
-        $path = (new AccountRepository($config->accountsDir))->save($name, $account);
+        $repository = new AccountRepository($config->accountsDir);
+        if ($name === null) {
+            $name = $repository->resolveImplicitName($account->name(), $account->accountId());
+            $account = $account->withName($name);
+        }
+        $path = $repository->save($name, $account);
 
         $output->writeln("Imported {$account->name()} to {$path}");
 

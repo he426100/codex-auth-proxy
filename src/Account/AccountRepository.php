@@ -49,6 +49,25 @@ final class AccountRepository
         return $this->write($path, $account);
     }
 
+    public function resolveImplicitName(string $baseName, string $accountId): string
+    {
+        $base = $this->safeName($baseName);
+        $path = $this->pathForName($base);
+        if (!is_file($path) || $this->fileBelongsToAccount($path, $accountId)) {
+            return $base;
+        }
+
+        $suffix = $this->safeName($accountId);
+        $candidate = $base . '-' . $suffix;
+        $index = 2;
+        while (is_file($this->pathForName($candidate)) && !$this->fileBelongsToAccount($this->pathForName($candidate), $accountId)) {
+            $candidate = $base . '-' . $suffix . '-' . $index;
+            $index++;
+        }
+
+        return $candidate;
+    }
+
     public function saveAccount(CodexAccount $account): string
     {
         if ($account->sourcePath() !== '') {
@@ -88,6 +107,25 @@ final class AccountRepository
         chmod($path, 0600);
 
         return $path;
+    }
+
+    private function pathForName(string $name): string
+    {
+        return rtrim($this->directory, '/') . '/' . $this->safeName($name) . '.account.json';
+    }
+
+    private function fileBelongsToAccount(string $path, string $accountId): bool
+    {
+        $decoded = json_decode((string) file_get_contents($path), true);
+        if (!is_array($decoded)) {
+            return false;
+        }
+
+        try {
+            return $this->validator->validate($decoded, $path)->accountId() === $accountId;
+        } catch (InvalidArgumentException) {
+            return false;
+        }
     }
 
     private function safeName(string $name): string

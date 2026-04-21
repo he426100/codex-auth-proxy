@@ -26,6 +26,19 @@ final class CodexAuthImporterTest extends TestCase
         self::assertSame('acct-alpha', $account->accountId());
     }
 
+    public function testInfersAccountNameFromEmailWhenNameIsOmitted(): void
+    {
+        $source = [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ];
+
+        $accountFile = (new CodexAuthImporter())->import($source);
+        $account = (new AccountFileValidator())->validate($accountFile);
+
+        self::assertSame('alpha-example.com', $account->name());
+    }
+
     public function testRejectsApiKeyAuthJsonDuringImport(): void
     {
         $this->expectException(InvalidArgumentException::class);

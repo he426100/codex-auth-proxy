@@ -56,4 +56,15 @@ final class AccountRepositoryTest extends TestCase
         self::assertSame($dir . '/alpha.account.json', $path);
         self::assertSame($this->accountFixture('beta')['tokens']['access_token'], $decoded['tokens']['access_token']);
     }
+
+    public function testResolvesImplicitNameConflictWithAccountIdSuffix(): void
+    {
+        $dir = $this->tempDir('cap-accounts');
+        $repository = new AccountRepository($dir);
+        $existing = (new \CodexAuthProxy\Account\AccountFileValidator())->validate($this->accountFixture('alpha'));
+        $repository->save('alpha-example.com', $existing);
+
+        self::assertSame('alpha-example.com', $repository->resolveImplicitName('alpha-example.com', 'acct-alpha'));
+        self::assertSame('alpha-example.com-acct-beta', $repository->resolveImplicitName('alpha-example.com', 'acct-beta'));
+    }
 }

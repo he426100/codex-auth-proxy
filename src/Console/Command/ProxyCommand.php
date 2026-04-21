@@ -49,6 +49,13 @@ abstract class ProxyCommand extends Command
         return is_string($value) && trim($value) !== '' ? trim($value) : null;
     }
 
+    protected function stringArgument(InputInterface $input, string $name): ?string
+    {
+        $value = $input->getArgument($name);
+
+        return is_string($value) && trim($value) !== '' ? trim($value) : null;
+    }
+
     protected function intOption(InputInterface $input, string $name): ?int
     {
         if (!$input->hasOption($name)) {

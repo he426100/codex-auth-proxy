@@ -74,11 +74,50 @@ bin/codex-auth-proxy login account-a
 bin/codex-auth-proxy import account-a --from="$HOME/.codex/auth.json"
 ```
 
+`account-a` 和 `--from` 都是可选参数。省略 `--from` 时默认读取 `$HOME/.codex/auth.json`。省略账号名时，工具会从 token 里的 email 自动生成本地账号名；如果没有 email，则回退到 ChatGPT account id：
+
+```bash
+bin/codex-auth-proxy login
+bin/codex-auth-proxy import
+```
+
 如果有多个账号，重复执行 `login` 或 `import`，使用不同名称即可：
 
 ```bash
 bin/codex-auth-proxy login account-b
 bin/codex-auth-proxy login account-c
+```
+
+## 导出和手动切换 Codex CLI
+
+导出 Codex CLI 可用的配置和授权文件：
+
+```bash
+bin/codex-auth-proxy export config
+bin/codex-auth-proxy export auth account-a
+bin/codex-auth-proxy export all account-a
+```
+
+默认只写入代理自己的目录，不覆盖 Codex CLI 当前文件：
+
+```text
+~/.config/codex-auth-proxy/config.toml
+~/.config/codex-auth-proxy/auth.json
+```
+
+`export config` 会读取 `~/.codex/config.toml`，只替换或插入文件开头的 `openai_base_url`，保留其他配置，例如 `projects`、`mcp_servers` 等。
+
+如果要手动切换当前 Codex CLI 配置，使用 `--apply`：
+
+```bash
+bin/codex-auth-proxy export all account-a --apply
+```
+
+命令会先交互确认。确认后先备份当前文件，再覆盖：
+
+```text
+~/.codex/config.toml.bak.YYYYmmddHHMMSS
+~/.codex/auth.json.bak.YYYYmmddHHMMSS
 ```
 
 ## 配置 Codex CLI

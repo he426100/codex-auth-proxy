@@ -10,7 +10,7 @@ use InvalidArgumentException;
 final class CodexAuthImporter
 {
     /** @param array<string,mixed> $source */
-    public function import(array $source, string $name): array
+    public function import(array $source, ?string $name = null): array
     {
         if (($source['auth_mode'] ?? null) !== 'chatgpt') {
             throw new InvalidArgumentException('Only chatgpt auth.json files can be imported');
@@ -33,11 +33,12 @@ final class CodexAuthImporter
             ? $auth['chatgpt_account_id']
             : ($tokens['account_id'] ?? '');
         $email = is_string($claims['email'] ?? null) ? $claims['email'] : '';
+        $accountName = $this->accountName($name, $email, is_string($accountId) ? $accountId : '');
 
         $imported = [
             'schema' => AccountFileValidator::SCHEMA,
             'provider' => AccountFileValidator::PROVIDER,
-            'name' => $name,
+            'name' => $accountName,
             'enabled' => true,
             'tokens' => [
                 'id_token' => trim($tokens['id_token']),
@@ -54,5 +55,18 @@ final class CodexAuthImporter
         (new AccountFileValidator())->validate($imported);
 
         return $imported;
+    }
+
+    private function accountName(?string $requestedName, string $email, string $accountId): string
+    {
+        if (is_string($requestedName) && trim($requestedName) !== '') {
+            return trim($requestedName);
+        }
+
+        $base = trim($email) !== '' ? $email : $accountId;
+        $safe = preg_replace('/[^A-Za-z0-9_.-]+/', '-', $base);
+        $safe = trim((string) $safe, '.-');
+
+        return $safe !== '' ? $safe : 'account';
     }
 }

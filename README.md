@@ -49,6 +49,38 @@ Import the currently active Codex ChatGPT login:
 bin/codex-auth-proxy import account-a --from="$HOME/.codex/auth.json"
 ```
 
+Both `account-a` and `--from` are optional. When `--from` is omitted, the importer reads `$HOME/.codex/auth.json`. When the name is omitted, the proxy infers a local account name from the token email, falling back to the ChatGPT account ID:
+
+```bash
+bin/codex-auth-proxy login
+bin/codex-auth-proxy import
+```
+
+Export Codex CLI files for manual switching:
+
+```bash
+bin/codex-auth-proxy export config
+bin/codex-auth-proxy export auth account-a
+bin/codex-auth-proxy export all account-a
+```
+
+Exports are written to:
+
+```text
+~/.config/codex-auth-proxy/config.toml
+~/.config/codex-auth-proxy/auth.json
+```
+
+`export config` reads `~/.codex/config.toml`, replaces or prepends only the leading `openai_base_url`, and preserves the rest of the file, including project and MCP settings.
+
+Use `--apply` to prompt before backing up and overwriting Codex CLI's active files:
+
+```bash
+bin/codex-auth-proxy export all account-a --apply
+```
+
+Existing files are backed up as `~/.codex/config.toml.bak.YYYYmmddHHMMSS` and `~/.codex/auth.json.bak.YYYYmmddHHMMSS` before being overwritten.
+
 Validate imported accounts:
 
 ```bash

@@ -7,6 +7,7 @@ namespace CodexAuthProxy\Console;
 use CodexAuthProxy\Config\AppConfigLoader;
 use CodexAuthProxy\Console\Command\ConfigCommand;
 use CodexAuthProxy\Console\Command\DoctorCommand;
+use CodexAuthProxy\Console\Command\ExportCommand;
 use CodexAuthProxy\Console\Command\ImportCommand;
 use CodexAuthProxy\Console\Command\LoginCommand;
 use CodexAuthProxy\Console\Command\ServeCommand;
@@ -37,6 +38,7 @@ final class Application extends SymfonyApplication
         $callbackServer ??= new LoopbackCallbackServer();
 
         $this->add(new ImportCommand($configLoader));
+        $this->add(new ExportCommand($configLoader));
         $this->add(new DoctorCommand($configLoader));
         $this->add(new ConfigCommand($configLoader));
         $this->add(new ServeCommand($configLoader, $logger));
