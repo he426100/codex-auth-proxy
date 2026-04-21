@@ -108,7 +108,7 @@ Runtime defaults can be overridden with CLI options or `.env` variables:
 ```dotenv
 CODEX_AUTH_PROXY_HOST=127.0.0.1
 CODEX_AUTH_PROXY_PORT=1456
-CODEX_AUTH_PROXY_CALLBACK_HOST=127.0.0.1
+CODEX_AUTH_PROXY_CALLBACK_HOST=localhost
 CODEX_AUTH_PROXY_CALLBACK_PORT=1455
 CODEX_AUTH_PROXY_ACCOUNTS_DIR=/home/me/.config/codex-auth-proxy/accounts
 CODEX_AUTH_PROXY_STATE_FILE=/home/me/.config/codex-auth-proxy/state.json
@@ -133,4 +133,28 @@ Session IDs are extracted from Codex turn-state/session headers, `metadata.user_
 composer install
 composer test
 composer analyse
+```
+
+Validate the PHAR build configuration:
+
+```bash
+composer box:validate
+```
+
+Build a distributable PHAR:
+
+```bash
+composer build:phar
+```
+
+The PHAR is written to:
+
+```text
+build/codex-auth-proxy.phar
+```
+
+Run it like the source binary:
+
+```bash
+php build/codex-auth-proxy.phar --version
 ```

@@ -1,0 +1,15 @@
+{
+  "output": "build/codex-auth-proxy.phar",
+  "blacklist": [
+    ".git",
+    ".github",
+    ".box",
+    "build",
+    "docs",
+    "tests",
+    "var",
+    "phpstan.neon.dist",
+    "phpunit.xml.dist",
+    "box.json.dist"
+  ]
+}

@@ -32,7 +32,7 @@ final class AppConfigLoader
             'host' => $this->stringValue($overrides['host'] ?? null) ?? $this->env('CODEX_AUTH_PROXY_HOST') ?? '127.0.0.1',
             'port' => $this->intValue($overrides['port'] ?? null) ?? $this->envInt('CODEX_AUTH_PROXY_PORT') ?? 1456,
             'cooldown_seconds' => $this->intValue($overrides['cooldown_seconds'] ?? null) ?? $this->envInt('CODEX_AUTH_PROXY_COOLDOWN_SECONDS') ?? 18000,
-            'callback_host' => $this->stringValue($overrides['callback_host'] ?? null) ?? $this->env('CODEX_AUTH_PROXY_CALLBACK_HOST') ?? '127.0.0.1',
+            'callback_host' => $this->stringValue($overrides['callback_host'] ?? null) ?? $this->env('CODEX_AUTH_PROXY_CALLBACK_HOST') ?? 'localhost',
             'callback_port' => $this->intValue($overrides['callback_port'] ?? null) ?? $this->envInt('CODEX_AUTH_PROXY_CALLBACK_PORT') ?? 1455,
             'callback_timeout_seconds' => $this->intValue($overrides['callback_timeout_seconds'] ?? null) ?? $this->envInt('CODEX_AUTH_PROXY_CALLBACK_TIMEOUT_SECONDS') ?? 300,
             'log_level' => $this->stringValue($overrides['log_level'] ?? null) ?? $this->env('CODEX_AUTH_PROXY_LOG_LEVEL') ?? 'warning',

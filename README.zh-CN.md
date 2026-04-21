@@ -149,7 +149,7 @@ bin/codex-auth-proxy serve --port=1456
 ```dotenv
 CODEX_AUTH_PROXY_HOST=127.0.0.1
 CODEX_AUTH_PROXY_PORT=1456
-CODEX_AUTH_PROXY_CALLBACK_HOST=127.0.0.1
+CODEX_AUTH_PROXY_CALLBACK_HOST=localhost
 CODEX_AUTH_PROXY_CALLBACK_PORT=1455
 CODEX_AUTH_PROXY_ACCOUNTS_DIR=/home/me/.config/codex-auth-proxy/accounts
 CODEX_AUTH_PROXY_STATE_FILE=/home/me/.config/codex-auth-proxy/state.json
@@ -182,6 +182,30 @@ composer test
 
 ```bash
 composer analyse
+```
+
+校验 PHAR 打包配置：
+
+```bash
+composer box:validate
+```
+
+构建可分发的 PHAR：
+
+```bash
+composer build:phar
+```
+
+输出文件：
+
+```text
+build/codex-auth-proxy.phar
+```
+
+运行方式与源码入口一致：
+
+```bash
+php build/codex-auth-proxy.phar --version
 ```
 
 ## 设计取舍

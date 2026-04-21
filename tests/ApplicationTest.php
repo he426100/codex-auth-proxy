@@ -94,7 +94,7 @@ final class ApplicationTest extends TestCase
         $code = $tester->execute(['name' => 'alpha', '--callback-port' => '1455']);
 
         self::assertSame(0, $code);
-        self::assertSame('http://127.0.0.1:1455/auth/callback', $oauthClient->redirectUri);
+        self::assertSame('http://localhost:1455/auth/callback', $oauthClient->redirectUri);
         self::assertSame('code-alpha', $oauthClient->code);
         self::assertFileExists($home . '/.config/codex-auth-proxy/accounts/alpha.account.json');
         self::assertStringContainsString('Open this URL', $tester->getDisplay());
