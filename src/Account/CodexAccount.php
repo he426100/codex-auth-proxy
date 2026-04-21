@@ -10,6 +10,7 @@ final class CodexAccount
         private readonly string $name,
         private readonly string $accountId,
         private readonly string $email,
+        private readonly string $planType,
         private string $idToken,
         private string $accessToken,
         private string $refreshToken,
@@ -31,6 +32,11 @@ final class CodexAccount
     public function email(): string
     {
         return $this->email;
+    }
+
+    public function planType(): string
+    {
+        return $this->planType;
     }
 
     public function idToken(): string
@@ -64,6 +70,7 @@ final class CodexAccount
             $name,
             $this->accountId,
             $this->email,
+            $this->planType,
             $this->idToken,
             $this->accessToken,
             $this->refreshToken,
@@ -78,6 +85,7 @@ final class CodexAccount
             $this->name,
             $this->accountId,
             $this->email,
+            $this->planType,
             $idToken,
             $accessToken,
             $refreshToken,

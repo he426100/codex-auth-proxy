@@ -87,6 +87,30 @@ Validate imported accounts:
 bin/codex-auth-proxy doctor
 ```
 
+Manage imported accounts:
+
+```bash
+bin/codex-auth-proxy accounts list
+bin/codex-auth-proxy accounts status
+bin/codex-auth-proxy accounts status account-a
+bin/codex-auth-proxy accounts delete account-a
+```
+
+`accounts status` creates a temporary isolated `CODEX_HOME` for the selected account, writes that account's `auth.json`, and calls the local `codex app-server` `account/rateLimits/read` method. This uses Codex CLI's own quota reader instead of guessing remote usage URLs.
+
+It prints the account plan plus the 5h and weekly quota windows:
+
+```text
+account-a
+  Account: account-a@example.com (Plus)
+  5h limit: 7% left (resets 2026-04-21 18:10)
+  Weekly limit: 85% left (resets 2026-04-28 13:10)
+```
+
+When no account name is provided, it checks every imported account. Add `--json` for machine-readable output. `accounts delete` archives the account file as `.deleted.YYYYmmddHHMMSS` after confirmation; use `--yes` to skip the prompt.
+
+This command requires the `codex` binary to be available and sends the stored ChatGPT OAuth token to OpenAI through Codex CLI's official app-server flow.
+
 Print the Codex config snippet:
 
 ```bash

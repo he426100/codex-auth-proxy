@@ -88,6 +88,47 @@ bin/codex-auth-proxy login account-b
 bin/codex-auth-proxy login account-c
 ```
 
+## 账号管理和额度查询
+
+查看已导入账号，包含账号名、邮箱、账号等级和 ChatGPT account id：
+
+```bash
+bin/codex-auth-proxy accounts list
+```
+
+查询账号额度：
+
+```bash
+bin/codex-auth-proxy accounts status
+bin/codex-auth-proxy accounts status account-a
+```
+
+`status` 会为目标账号创建临时隔离的 `CODEX_HOME`，写入该账号的 `auth.json`，再调用本机 `codex app-server` 的 `account/rateLimits/read` 方法查询 Codex 额度。这样使用 Codex CLI 自己的额度读取逻辑，不依赖本项目猜测远端 usage URL。
+
+输出类似 Codex CLI `/status` 的关键信息：
+
+```text
+account-a
+  Account: account-a@example.com (Plus)
+  5h limit: 7% left (resets 2026-04-21 18:10)
+  Weekly limit: 85% left (resets 2026-04-28 13:10)
+```
+
+如果不指定账号名，会依次查询所有账号。需要机器可读输出时可以加 `--json`：
+
+```bash
+bin/codex-auth-proxy accounts status --json
+```
+
+该功能要求当前环境能执行 `codex` 命令，并会使用账号文件中的 ChatGPT OAuth token 向 OpenAI 查询额度。
+
+删除账号会默认交互确认，并把账号文件归档为 `.deleted.YYYYmmddHHMMSS`，避免误删 OAuth 授权：
+
+```bash
+bin/codex-auth-proxy accounts delete account-a
+bin/codex-auth-proxy accounts delete account-a --yes
+```
+
 ## 导出和手动切换 Codex CLI
 
 导出 Codex CLI 可用的配置和授权文件：

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CodexAuthProxy\Console\Command;
 
 use CodexAuthProxy\Account\AccountRepository;
+use CodexAuthProxy\Account\CodexCliAuth;
 use CodexAuthProxy\Account\CodexAccount;
 use CodexAuthProxy\Config\AppConfig;
 use InvalidArgumentException;
@@ -77,15 +78,7 @@ final class ExportCommand extends ProxyCommand
     private function exportAuth(AppConfig $config, CodexAccount $account): string
     {
         $path = $this->proxyPath($config, 'auth.json');
-        $payload = [
-            'auth_mode' => 'chatgpt',
-            'tokens' => [
-                'id_token' => $account->idToken(),
-                'access_token' => $account->accessToken(),
-                'refresh_token' => $account->refreshToken(),
-                'account_id' => $account->accountId(),
-            ],
-        ];
+        $payload = CodexCliAuth::payload($account);
         $this->writeFile($path, json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n", 0600);
 
         return $path;

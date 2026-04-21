@@ -77,6 +77,36 @@ final class AccountRepository
         return $this->save($account->name(), $account);
     }
 
+    public function findByName(string $name): ?CodexAccount
+    {
+        foreach ($this->load() as $account) {
+            if ($account->name() === $name) {
+                return $account;
+            }
+        }
+
+        return null;
+    }
+
+    public function deleteByName(string $name): string
+    {
+        $account = $this->findByName($name);
+        if ($account === null) {
+            throw new InvalidArgumentException('Account not found: ' . $name);
+        }
+        if ($account->sourcePath() === '') {
+            throw new RuntimeException('Account source path is unavailable: ' . $name);
+        }
+
+        $archivedPath = $this->archivePath($account->sourcePath());
+        if (!rename($account->sourcePath(), $archivedPath)) {
+            throw new RuntimeException('Failed to archive account file: ' . $account->sourcePath());
+        }
+        chmod($archivedPath, 0600);
+
+        return $archivedPath;
+    }
+
     private function write(string $path, CodexAccount $account): string
     {
         $dir = dirname($path);
@@ -97,6 +127,7 @@ final class AccountRepository
             ],
             'metadata' => [
                 'email' => $account->email(),
+                'plan_type' => $account->planType(),
             ],
         ];
 
@@ -112,6 +143,19 @@ final class AccountRepository
     private function pathForName(string $name): string
     {
         return rtrim($this->directory, '/') . '/' . $this->safeName($name) . '.account.json';
+    }
+
+    private function archivePath(string $path): string
+    {
+        $base = $path . '.deleted.' . date('YmdHis');
+        $candidate = $base;
+        $index = 2;
+        while (file_exists($candidate)) {
+            $candidate = $base . '-' . $index;
+            $index++;
+        }
+
+        return $candidate;
     }
 
     private function fileBelongsToAccount(string $path, string $accountId): bool

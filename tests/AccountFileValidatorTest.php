@@ -18,6 +18,7 @@ final class AccountFileValidatorTest extends TestCase
         self::assertSame('alpha', $account->name());
         self::assertSame('acct-alpha', $account->accountId());
         self::assertSame('alpha@example.com', $account->email());
+        self::assertSame('plus', $account->planType());
     }
 
     public function testRejectsOrdinaryCodexAuthJsonWithoutProxySchema(): void

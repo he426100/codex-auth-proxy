@@ -67,4 +67,22 @@ final class AccountRepositoryTest extends TestCase
         self::assertSame('alpha-example.com', $repository->resolveImplicitName('alpha-example.com', 'acct-alpha'));
         self::assertSame('alpha-example.com-acct-beta', $repository->resolveImplicitName('alpha-example.com', 'acct-beta'));
     }
+
+    public function testFindsAndArchivesAccountByName(): void
+    {
+        $dir = $this->tempDir('cap-accounts');
+        $repository = new AccountRepository($dir);
+        $account = (new \CodexAuthProxy\Account\AccountFileValidator())->validate($this->accountFixture('alpha'));
+        $repository->save('alpha', $account);
+
+        self::assertSame('acct-alpha', $repository->findByName('alpha')->accountId());
+
+        $archivedPath = $repository->deleteByName('alpha');
+
+        self::assertFileDoesNotExist($dir . '/alpha.account.json');
+        self::assertFileExists($archivedPath);
+        self::assertStringContainsString('alpha.account.json.deleted.', $archivedPath);
+        self::assertNull($repository->findByName('alpha'));
+        self::assertSame([], $repository->load());
+    }
 }

@@ -63,10 +63,16 @@ final class AccountFileValidator
             $email = $this->optionalString($idPayload['email'] ?? null);
         }
 
+        $planType = $this->optionalString($data['metadata']['plan_type'] ?? null);
+        if ($planType === '') {
+            $planType = $this->optionalString($auth['chatgpt_plan_type'] ?? null);
+        }
+
         return new CodexAccount(
             trim($name),
             trim($accountId),
             $email,
+            $planType,
             $idToken,
             $accessToken,
             $refreshToken,
