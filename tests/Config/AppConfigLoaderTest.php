@@ -16,9 +16,7 @@ final class AppConfigLoaderTest extends TestCase
 
         try {
             $this->unsetEnvNames($this->proxyEnvNames());
-            if ($cwd !== false) {
-                chdir(dirname(__DIR__, 2));
-            }
+            chdir($this->tempDir('cap-empty-cwd'));
 
             $config = $this->newLoader()->load();
 
@@ -58,9 +56,7 @@ final class AppConfigLoaderTest extends TestCase
             $this->setEnv('CODEX_AUTH_PROXY_HTTPS_PROXY', 'https://auth-https:9443');
             $this->setEnv('CODEX_AUTH_PROXY_NO_PROXY', 'auth.local');
 
-            if ($cwd !== false) {
-                chdir(dirname(__DIR__, 2));
-            }
+            chdir($this->tempDir('cap-empty-cwd'));
 
             $config = $this->newLoader()->load();
 
@@ -69,6 +65,38 @@ final class AppConfigLoaderTest extends TestCase
             self::assertSame('http://auth-http:8888', $config->httpProxy);
             self::assertSame('https://auth-https:9443', $config->httpsProxy);
             self::assertSame('auth.local', $config->noProxy);
+        } finally {
+            $this->restoreEnv($snapshot);
+
+            if ($cwd !== false) {
+                chdir($cwd);
+            }
+        }
+    }
+
+    public function testCommittedDefaultsLoadDotenvFromCurrentWorkingDirectory(): void
+    {
+        $snapshot = $this->snapshotEnv($this->proxyEnvNames());
+        $cwd = getcwd();
+        $dotenvDir = $this->tempDir('cap-dotenv-cwd');
+        file_put_contents($dotenvDir . '/.env', implode("\n", [
+            'CODEX_AUTH_PROXY_HOME=/tmp/codex-auth-dotenv-home',
+            'CODEX_AUTH_PROXY_HOST=10.30.40.50',
+            'CODEX_AUTH_PROXY_PORT=4567',
+            'CODEX_AUTH_PROXY_HTTPS_PROXY=http://dotenv-proxy.local:8443',
+            '',
+        ]));
+
+        try {
+            $this->unsetEnvNames($this->proxyEnvNames());
+            chdir($dotenvDir);
+
+            $config = (new AppConfigLoader())->load();
+
+            self::assertSame('/tmp/codex-auth-dotenv-home', $config->home);
+            self::assertSame('10.30.40.50', $config->host);
+            self::assertSame(4567, $config->port);
+            self::assertSame('http://dotenv-proxy.local:8443', $config->httpsProxy);
         } finally {
             $this->restoreEnv($snapshot);
 
@@ -88,10 +116,13 @@ final class AppConfigLoaderTest extends TestCase
         ];
         $snapshot = $this->snapshotEnv($names);
         $defaultsFile = $this->tempDir('cap-config') . '/defaults.php';
-        file_put_contents($defaultsFile, <<<'PHP'
+        $envHelper = dirname(__DIR__, 2) . '/src/Config/env.php';
+        file_put_contents($defaultsFile, <<<PHP
 <?php
 
 declare(strict_types=1);
+
+require_once '{$envHelper}';
 
 return [
     'home' => env('CAP_TEST_HOME', '/tmp/default-home'),
@@ -116,7 +147,7 @@ PHP);
             $this->setEnv('CAP_TEST_PORT', '3456');
             $this->setEnv('CAP_TEST_HTTP_PROXY', 'http://proxy.local:8080');
 
-            $config = (new AppConfigLoader(null, '/tmp/codex-auth-proxy-missing.env', $defaultsFile))->load();
+            $config = (new AppConfigLoader(defaultsFile: $defaultsFile))->load();
 
             self::assertSame('/tmp/hyperf-style-home', $config->home);
             self::assertSame('10.20.30.40', $config->host);
@@ -145,9 +176,7 @@ PHP);
             $this->setEnv('NO_PROXY', 'standard.local');
             $this->setEnv('no_proxy', 'standard-lower.local');
 
-            if ($cwd !== false) {
-                chdir(dirname(__DIR__, 2));
-            }
+            chdir($this->tempDir('cap-empty-cwd'));
 
             $config = $this->newLoader()->load();
 
@@ -175,9 +204,7 @@ PHP);
             $this->setEnv('CODEX_AUTH_PROXY_HTTPS_PROXY', 'https://auth-https:9443');
             $this->setEnv('CODEX_AUTH_PROXY_NO_PROXY', 'auth.local');
 
-            if ($cwd !== false) {
-                chdir(dirname(__DIR__, 2));
-            }
+            chdir($this->tempDir('cap-empty-cwd'));
 
             $config = $this->newLoader()->load([
                 'host' => '192.168.0.10',
@@ -290,6 +317,6 @@ PHP);
 
     private function newLoader(): AppConfigLoader
     {
-        return new AppConfigLoader('/tmp/codex-auth-home', '/tmp/codex-auth-proxy-missing.env');
+        return new AppConfigLoader('/tmp/codex-auth-home');
     }
 }

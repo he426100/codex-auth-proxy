@@ -2,6 +2,15 @@
 
 declare(strict_types=1);
 
+use Symfony\Component\Dotenv\Dotenv;
+
+require_once dirname(__DIR__) . '/src/Config/env.php';
+
+$envFile = (getcwd() ?: '.') . '/.env';
+if (is_file($envFile)) {
+    (new Dotenv())->usePutenv()->loadEnv($envFile);
+}
+
 $home = (string) env('CODEX_AUTH_PROXY_HOME', env('HOME', '.'));
 
 return [

@@ -6,13 +6,11 @@ namespace CodexAuthProxy\Config;
 
 use RuntimeException;
 use Symfony\Component\Config\Definition\Processor;
-use Symfony\Component\Dotenv\Dotenv;
 
 final class AppConfigLoader
 {
     public function __construct(
         private readonly ?string $home = null,
-        private readonly ?string $envFile = null,
         private readonly ?string $defaultsFile = null,
     ) {
     }
@@ -20,13 +18,12 @@ final class AppConfigLoader
     /** @param array<string,mixed> $overrides */
     public function load(array $overrides = []): AppConfig
     {
-        $this->loadDotenv();
         $defaults = $this->loadDefaults();
 
         $home = $this->stringValue($overrides['home'] ?? null)
             ?? $this->home
             ?? $this->stringValue($defaults['home'] ?? null)
-            ?? (getenv('HOME') ?: '.');
+            ?? '.';
         $home = rtrim($home, '/');
         $root = $home . '/.config/codex-auth-proxy';
 
@@ -104,14 +101,6 @@ final class AppConfigLoader
         );
     }
 
-    private function loadDotenv(): void
-    {
-        $envFile = $this->envFile ?? ((getcwd() ?: '.') . '/.env');
-        if (is_file($envFile)) {
-            (new Dotenv())->usePutenv()->loadEnv($envFile);
-        }
-    }
-
     /** @return array<string,mixed> */
     private function loadDefaults(): array
     {
@@ -120,7 +109,6 @@ final class AppConfigLoader
             throw new RuntimeException('Missing defaults file: ' . $defaultsFile);
         }
 
-        require_once __DIR__ . '/env.php';
         $defaults = require $defaultsFile;
         if (!is_array($defaults)) {
             throw new RuntimeException('Defaults file must return an array: ' . $defaultsFile);

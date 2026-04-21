@@ -161,6 +161,8 @@ Outbound proxy settings are applied to OAuth token exchange, token refresh, `ser
 
 `CODEX_AUTH_PROXY_NO_PROXY` supports exact hosts/IPs, `localhost`, loopback addresses, host values with ports, `*`, and suffix matching with either `openai.com` or `.openai.com`.
 
+If `serve` logs an upstream WebSocket or HTTPS failure with `status -1`, the Swoole client did not receive an upstream HTTP response. On networks that cannot connect to `chatgpt.com` directly, set `CODEX_AUTH_PROXY_HTTPS_PROXY` to an HTTP proxy URL.
+
 ## Routing Policy
 
 The proxy keeps session affinity: the same Codex session stays on the same account. It switches only when the upstream response is classified as a hard quota/auth failure, then records a cooldown in:

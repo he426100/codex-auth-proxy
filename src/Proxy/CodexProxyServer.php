@@ -250,6 +250,9 @@ final class CodexProxyServer
         $client->execute($path);
         $status = (int) ($client->statusCode ?: 502);
         $responseHeaders = is_array($client->headers ?? null) ? $client->headers : [];
+        if ($client->statusCode === -1) {
+            $buffer = $this->upstreamClientError('HTTP request', $client);
+        }
         if (!$streamed && !$streamErrorBuffered) {
             foreach ($framer->flush() as $frame) {
                 if (!$headersSent) {
@@ -298,6 +301,9 @@ final class CodexProxyServer
         if (!$client->upgrade($path) || (int) $client->statusCode !== 101) {
             $body = is_string($client->body ?? null) ? $client->body : '';
             $status = (int) ($client->statusCode ?: 502);
+            if ($client->statusCode === -1) {
+                $body = $this->upstreamClientError('WebSocket upgrade', $client);
+            }
             $client->close();
             throw new RuntimeException('Upstream WebSocket upgrade failed with status ' . $status . ': ' . $body);
         }
@@ -314,6 +320,16 @@ final class CodexProxyServer
         $proxyOptions = $this->outboundProxyConfig?->swooleOptionsFor($host) ?? [];
 
         return array_merge($baseOptions, $proxyOptions);
+    }
+
+    private function upstreamClientError(string $operation, Client $client): string
+    {
+        $message = socket_strerror((int) $client->errCode);
+        if ($message === '' || $message === 'Success') {
+            $message = 'unknown error';
+        }
+
+        return $operation . ' failed: errCode=' . (int) $client->errCode . ' errMsg=' . $message;
     }
 
     /**
