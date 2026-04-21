@@ -1,0 +1,37 @@
+{
+  "name": "he426100/codex-auth-proxy",
+  "description": "A small PHP/Swoole proxy for routing Codex CLI through multiple manually imported ChatGPT OAuth accounts.",
+  "type": "project",
+  "require": {
+    "php": "^8.3",
+    "ext-json": "*",
+    "ext-redis": "*",
+    "ext-swoole": "*",
+    "guzzlehttp/guzzle": "^7.9",
+    "monolog/monolog": "^3.7",
+    "symfony/config": "^7.3",
+    "symfony/console": "^7.3",
+    "symfony/dotenv": "^7.3"
+  },
+  "require-dev": {
+    "phpstan/phpstan": "^2.1",
+    "phpunit/phpunit": "^11.5"
+  },
+  "autoload": {
+    "psr-4": {
+      "CodexAuthProxy\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "CodexAuthProxy\\Tests\\": "tests/"
+    }
+  },
+  "bin": [
+    "bin/codex-auth-proxy"
+  ],
+  "scripts": {
+    "test": "phpunit",
+    "analyse": "phpstan analyse"
+  }
+}
