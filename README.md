@@ -87,14 +87,21 @@ Validate imported accounts:
 bin/codex-auth-proxy doctor
 ```
 
-Manage imported accounts:
+Manage imported accounts and cached quota state:
 
 ```bash
+bin/codex-auth-proxy accounts
 bin/codex-auth-proxy accounts list
+bin/codex-auth-proxy accounts refresh
+bin/codex-auth-proxy accounts refresh account-a
 bin/codex-auth-proxy accounts status
 bin/codex-auth-proxy accounts status account-a
 bin/codex-auth-proxy accounts delete account-a
 ```
+
+`accounts` shows the locally cached cooldown and quota availability for imported accounts.
+
+`accounts refresh` uses the existing usage reader to fetch the current Codex quota for one account or all accounts, then updates the local state cache.
 
 `accounts status` creates a temporary isolated `CODEX_HOME` for the selected account, writes that account's `auth.json`, and calls the local `codex app-server` `account/rateLimits/read` method. This uses Codex CLI's own quota reader instead of guessing remote usage URLs.
 
@@ -123,7 +130,7 @@ Start the proxy:
 bin/codex-auth-proxy serve --port=1456
 ```
 
-The proxy supports Codex HTTP/SSE and WebSocket requests. Requests are mapped from Codex CLI's `/v1/*` base URL to ChatGPT's Codex backend (`https://chatgpt.com/backend-api/codex`). HTTP streams are framed as SSE before forwarding to Codex, and first-frame quota/auth errors are intercepted before bytes are sent so the proxy can switch to another available account. WebSocket requests use Codex websocket v2 headers and retry once on a replacement account when a quota/auth error arrives before any upstream data has been forwarded.
+The proxy supports Codex HTTP/SSE and WebSocket requests. Requests are mapped from Codex CLI's `/v1/*` base URL to ChatGPT's Codex backend (`https://chatgpt.com/backend-api/codex`). `serve` stays on the direct upstream proxy path; it only consults the cached quota availability and cooldown state to choose an account, and it does not depend on `app-server` being in the main request path. HTTP streams are framed as SSE before forwarding to Codex, and first-frame quota/auth errors are intercepted before bytes are sent so the proxy can switch to another available account. WebSocket requests use Codex websocket v2 headers and retry once on a replacement account when a quota/auth error arrives before any upstream data has been forwarded.
 
 ## Configuration
 

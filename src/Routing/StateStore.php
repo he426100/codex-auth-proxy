@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CodexAuthProxy\Routing;
 
 use RuntimeException;
+use CodexAuthProxy\Usage\CachedAccountUsage;
 
 final class StateStore
 {
@@ -13,19 +14,28 @@ final class StateStore
     {
     }
 
-    public static function memory(): self
+    /**
+     * @return array{accounts: array<string,mixed>, sessions: array<string,mixed>, cursor: int, usage: array<string,mixed>}
+     */
+    private static function defaultState(): array
     {
-        return new self([
+        return [
             'accounts' => [],
             'sessions' => [],
             'cursor' => 0,
-        ]);
+            'usage' => [],
+        ];
+    }
+
+    public static function memory(): self
+    {
+        return new self(self::defaultState());
     }
 
     public static function file(string $path): self
     {
         if (!is_file($path)) {
-            return new self(['accounts' => [], 'sessions' => [], 'cursor' => 0], $path);
+            return new self(self::defaultState(), $path);
         }
 
         $decoded = json_decode((string) file_get_contents($path), true);
@@ -33,7 +43,12 @@ final class StateStore
             throw new RuntimeException('State file must be a JSON object: ' . $path);
         }
 
-        return new self($decoded + ['accounts' => [], 'sessions' => [], 'cursor' => 0], $path);
+        $state = $decoded + self::defaultState();
+        if (!isset($state['usage']) || !is_array($state['usage'])) {
+            $state['usage'] = [];
+        }
+
+        return new self($state, $path);
     }
 
     public function sessionAccount(string $sessionKey): ?string
@@ -73,6 +88,55 @@ final class StateStore
     {
         $this->state['cursor'] = max(0, $cursor);
         $this->save();
+    }
+
+    /**
+     * @return array<string,CachedAccountUsage>
+     */
+    public function allAccountUsage(): array
+    {
+        if (!isset($this->state['usage']) || !is_array($this->state['usage'])) {
+            return [];
+        }
+
+        $usage = [];
+        foreach ($this->state['usage'] as $accountId => $value) {
+            if (!is_string($accountId) || !is_array($value)) {
+                continue;
+            }
+            $entry = CachedAccountUsage::fromArray($value);
+            if ($entry !== null) {
+                $usage[$accountId] = $entry;
+            }
+        }
+
+        return $usage;
+    }
+
+    public function accountUsage(string $accountId): ?CachedAccountUsage
+    {
+        $usage = $this->allAccountUsage();
+
+        return $usage[$accountId] ?? null;
+    }
+
+    public function setAccountUsage(string $accountId, CachedAccountUsage $usage): void
+    {
+        if (!isset($this->state['usage']) || !is_array($this->state['usage'])) {
+            $this->state['usage'] = [];
+        }
+
+        $this->state['usage'][$accountId] = $usage->toArray();
+        $this->save();
+    }
+
+    public function setAccountUsageError(string $accountId, string $error, int $checkedAt): void
+    {
+        $current = $this->accountUsage($accountId);
+        $updated = $current?->withError($error, $checkedAt)
+            ?? new CachedAccountUsage('', $checkedAt, $error, null, null);
+
+        $this->setAccountUsage($accountId, $updated);
     }
 
     private function save(): void

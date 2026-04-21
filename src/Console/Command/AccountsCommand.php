@@ -9,7 +9,11 @@ use CodexAuthProxy\Account\CodexAccount;
 use CodexAuthProxy\Auth\TokenRefresher;
 use CodexAuthProxy\Config\AppConfig;
 use CodexAuthProxy\Config\AppConfigLoader;
+use CodexAuthProxy\Routing\StateStore;
+use CodexAuthProxy\Usage\AccountAvailability;
 use CodexAuthProxy\Usage\AccountUsage;
+use CodexAuthProxy\Usage\CachedAccountUsage;
+use CodexAuthProxy\Usage\CachedRateLimitWindow;
 use CodexAuthProxy\Usage\CodexUsageClient;
 use CodexAuthProxy\Usage\RateLimitWindow;
 use CodexAuthProxy\Usage\UsageClient;
@@ -38,8 +42,8 @@ final class AccountsCommand extends ProxyCommand
     protected function configure(): void
     {
         $this
-            ->addArgument('action', InputArgument::OPTIONAL, 'Action: list, status, or delete', 'list')
-            ->addArgument('name', InputArgument::OPTIONAL, 'Account name for status or delete')
+            ->addArgument('action', InputArgument::OPTIONAL, 'Action: list, refresh, status, or delete', 'list')
+            ->addArgument('name', InputArgument::OPTIONAL, 'Account name for refresh, status, or delete')
             ->addOption('json', null, InputOption::VALUE_NONE, 'Output machine-readable JSON')
             ->addOption('yes', 'y', InputOption::VALUE_NONE, 'Skip delete confirmation prompt');
         $this->addPathOptions();
@@ -52,18 +56,22 @@ final class AccountsCommand extends ProxyCommand
         $repository = new AccountRepository($config->accountsDir);
 
         return match ($action) {
-            'list' => $this->listAccounts($repository, $input, $output),
+            'list' => $this->listAccounts($repository, $config, $input, $output),
+            'refresh' => $this->refresh($repository, $config, $input, $output),
             'status' => $this->status($repository, $config, $input, $output),
             'delete' => $this->delete($repository, $input, $output),
-            default => throw new InvalidArgumentException('Action must be list, status, or delete'),
+            default => throw new InvalidArgumentException('Action must be list, refresh, status, or delete'),
         };
     }
 
-    private function listAccounts(AccountRepository $repository, InputInterface $input, OutputInterface $output): int
+    private function listAccounts(AccountRepository $repository, AppConfig $config, InputInterface $input, OutputInterface $output): int
     {
         $accounts = $repository->load();
+        $state = StateStore::file($config->stateFile);
+
         if ((bool) $input->getOption('json')) {
-            $output->writeln(json_encode(array_map(fn (CodexAccount $account): array => $this->accountJson($account), $accounts), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+            $rows = array_map(fn (CodexAccount $account): array => $this->accountDashboardJson($account, $state), $accounts);
+            $output->writeln(json_encode($rows, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
 
             return self::SUCCESS;
         }
@@ -74,15 +82,21 @@ final class AccountsCommand extends ProxyCommand
             return self::SUCCESS;
         }
 
+        $rows = array_map(fn (CodexAccount $account): array => $this->accountDashboardRow($account, $state), $accounts);
         $table = new Table($output);
-        $table->setHeaders(['Name', 'Email', 'Plan', 'Enabled', 'Account ID']);
-        foreach ($accounts as $account) {
+        $table->setHeaders(['Name', 'Email', 'Plan', 'Enabled', 'Cooldown', '5h left', 'Weekly left', 'Available', 'Reason', 'Checked at']);
+        foreach ($rows as $row) {
             $table->addRow([
-                $account->name(),
-                $account->email() !== '' ? $account->email() : '-',
-                $this->displayPlan($account->planType()),
-                $account->enabled() ? 'yes' : 'no',
-                $account->accountId(),
+                $row['name'],
+                $row['email'],
+                $row['plan'],
+                $row['enabled'],
+                $row['cooldown'],
+                $row['five_hour_left'],
+                $row['weekly_left'],
+                $row['available'],
+                $row['reason'],
+                $row['checked_at'],
             ]);
         }
         $table->render();
@@ -90,34 +104,36 @@ final class AccountsCommand extends ProxyCommand
         return self::SUCCESS;
     }
 
+    private function refresh(AccountRepository $repository, AppConfig $config, InputInterface $input, OutputInterface $output): int
+    {
+        $results = $this->fetchLiveUsageResults($repository, $config, $this->stringArgument($input, 'name'));
+        $failed = $this->hasFailure($results);
+
+        if ((bool) $input->getOption('json')) {
+            $output->writeln(json_encode(array_map(fn (array $result): array => $this->statusJson($result), $results), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+
+            return $failed ? self::FAILURE : self::SUCCESS;
+        }
+
+        foreach ($results as $result) {
+            /** @var CodexAccount $account */
+            $account = $result['account'];
+            if ($result['usage'] instanceof AccountUsage) {
+                $output->writeln($account->name() . ': success');
+
+                continue;
+            }
+
+            $output->writeln($account->name() . ': failure (' . $result['error'] . ')');
+        }
+
+        return $failed ? self::FAILURE : self::SUCCESS;
+    }
+
     private function status(AccountRepository $repository, AppConfig $config, InputInterface $input, OutputInterface $output): int
     {
-        $name = $this->stringArgument($input, 'name');
-        $accounts = $this->selectedAccounts($repository, $name);
-        $client = $this->usageClient ?? new CodexUsageClient();
-
-        $results = [];
-        $failed = false;
-        foreach ($accounts as $account) {
-            try {
-                $account = $this->refreshAccountIfNeeded($repository, $account);
-                $usage = $client->fetch($account);
-                $results[] = ['account' => $account, 'usage' => $usage, 'error' => null];
-            } catch (InvalidArgumentException|RuntimeException $exception) {
-                if ($exception instanceof RuntimeException && $this->isInvalidatedTokenFailure($exception)) {
-                    try {
-                        $account = $this->refreshAccount($repository, $account);
-                        $usage = $client->fetch($account);
-                        $results[] = ['account' => $account, 'usage' => $usage, 'error' => null];
-                        continue;
-                    } catch (InvalidArgumentException|RuntimeException $retryException) {
-                        $exception = $retryException;
-                    }
-                }
-                $failed = true;
-                $results[] = ['account' => $account, 'usage' => null, 'error' => $exception->getMessage()];
-            }
-        }
+        $results = $this->fetchLiveUsageResults($repository, $config, $this->stringArgument($input, 'name'));
+        $failed = $this->hasFailure($results);
 
         if ((bool) $input->getOption('json')) {
             $output->writeln(json_encode(array_map(fn (array $result): array => $this->statusJson($result), $results), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
@@ -144,6 +160,44 @@ final class AccountsCommand extends ProxyCommand
         }
 
         return $failed ? self::FAILURE : self::SUCCESS;
+    }
+
+    /** @return list<array{account:CodexAccount,usage:?AccountUsage,error:?string}> */
+    private function fetchLiveUsageResults(AccountRepository $repository, AppConfig $config, ?string $name): array
+    {
+        $accounts = $this->selectedAccounts($repository, $name);
+        $client = $this->usageClient ?? new CodexUsageClient();
+        $state = StateStore::file($config->stateFile);
+        $results = [];
+
+        foreach ($accounts as $account) {
+            $checkedAt = time();
+
+            try {
+                $account = $this->refreshAccountIfNeeded($repository, $account);
+                $usage = $client->fetch($account);
+                $state->setAccountUsage($account->accountId(), CachedAccountUsage::fromLive($usage, $checkedAt));
+                $results[] = ['account' => $account, 'usage' => $usage, 'error' => null];
+            } catch (InvalidArgumentException|RuntimeException $exception) {
+                if ($exception instanceof RuntimeException && $this->isInvalidatedTokenFailure($exception)) {
+                    try {
+                        $account = $this->refreshAccount($repository, $account);
+                        $usage = $client->fetch($account);
+                        $state->setAccountUsage($account->accountId(), CachedAccountUsage::fromLive($usage, $checkedAt));
+                        $results[] = ['account' => $account, 'usage' => $usage, 'error' => null];
+
+                        continue;
+                    } catch (InvalidArgumentException|RuntimeException $retryException) {
+                        $exception = $retryException;
+                    }
+                }
+
+                $state->setAccountUsageError($account->accountId(), $exception->getMessage(), $checkedAt);
+                $results[] = ['account' => $account, 'usage' => null, 'error' => $exception->getMessage()];
+            }
+        }
+
+        return $results;
     }
 
     private function delete(AccountRepository $repository, InputInterface $input, OutputInterface $output): int
@@ -282,6 +336,76 @@ final class AccountsCommand extends ProxyCommand
         ];
     }
 
+    /** @return array<string,mixed> */
+    private function accountDashboardRow(CodexAccount $account, StateStore $state): array
+    {
+        $snapshot = $this->accountDashboardSnapshot($account, $state);
+        $availability = $snapshot['availability'];
+        $usage = $snapshot['usage'];
+        $cooldownUntil = $snapshot['cooldown_until'];
+        $now = $snapshot['now'];
+
+        return [
+            'name' => $account->name(),
+            'email' => $account->email() !== '' ? $account->email() : '-',
+            'plan' => $this->displayPlan($snapshot['plan_type']),
+            'enabled' => $account->enabled() ? 'yes' : 'no',
+            'cooldown' => $this->formatCooldown($cooldownUntil, $now),
+            'five_hour_left' => $this->formatCachedWindowPercent($usage?->primary),
+            'weekly_left' => $this->formatCachedWindowPercent($usage?->secondary),
+            'available' => $this->formatAvailability($availability),
+            'reason' => $this->formatAvailabilityReason($availability->reason, $usage?->error),
+            'checked_at' => $this->formatTimestamp($usage?->checkedAt),
+        ];
+    }
+
+    /** @return array<string,mixed> */
+    private function accountDashboardJson(CodexAccount $account, StateStore $state): array
+    {
+        $snapshot = $this->accountDashboardSnapshot($account, $state);
+        $availability = $snapshot['availability'];
+        $usage = $snapshot['usage'];
+        $cooldownUntil = $snapshot['cooldown_until'];
+
+        return [
+            'name' => $account->name(),
+            'email' => $account->email(),
+            'plan_type' => $snapshot['plan_type'],
+            'enabled' => $account->enabled(),
+            'account_id' => $account->accountId(),
+            'cooldown_until' => $cooldownUntil > 0 ? $cooldownUntil : null,
+            'primary_left_percent' => $usage?->primary?->leftPercent,
+            'secondary_left_percent' => $usage?->secondary?->leftPercent,
+            'is_confirmed_available' => $availability->isConfirmedAvailable,
+            'routable' => $availability->routable,
+            'availability_reason' => $availability->reason,
+            'error' => $usage?->error,
+            'checked_at' => $usage?->checkedAt,
+            'file' => $account->sourcePath(),
+        ];
+    }
+
+    /** @return array{usage:?CachedAccountUsage,availability:AccountAvailability,cooldown_until:int,plan_type:string,now:int} */
+    private function accountDashboardSnapshot(CodexAccount $account, StateStore $state): array
+    {
+        $now = time();
+        $usage = $state->accountUsage($account->accountId());
+        $cooldownUntil = $state->cooldownUntil($account->accountId());
+        $availability = AccountAvailability::from($account, $cooldownUntil, $usage, $now);
+        $planType = $account->planType();
+        if ($usage instanceof CachedAccountUsage && $usage->planType !== '') {
+            $planType = $usage->planType;
+        }
+
+        return [
+            'usage' => $usage,
+            'availability' => $availability,
+            'cooldown_until' => $cooldownUntil,
+            'plan_type' => $planType,
+            'now' => $now,
+        ];
+    }
+
     /** @param array{account:CodexAccount,usage:?AccountUsage,error:?string} $result */
     private function statusJson(array $result): array
     {
@@ -299,6 +423,18 @@ final class AccountsCommand extends ProxyCommand
         ];
     }
 
+    /** @param list<array{account:CodexAccount,usage:?AccountUsage,error:?string}> $results */
+    private function hasFailure(array $results): bool
+    {
+        foreach ($results as $result) {
+            if ($result['error'] !== null) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /** @return array<string,mixed>|null */
     private function windowJson(?RateLimitWindow $window): ?array
     {
@@ -312,5 +448,50 @@ final class AccountsCommand extends ProxyCommand
             'window_minutes' => $window->windowMinutes,
             'resets_at' => $window->resetsAt,
         ];
+    }
+
+    private function formatAvailability(AccountAvailability $availability): string
+    {
+        if (!$availability->routable) {
+            return 'no';
+        }
+
+        return $availability->isConfirmedAvailable ? 'yes' : 'unknown';
+    }
+
+    private function formatCooldown(int $cooldownUntil, int $now): string
+    {
+        if ($cooldownUntil <= $now) {
+            return '-';
+        }
+
+        return $this->formatTimestamp($cooldownUntil);
+    }
+
+    private function formatTimestamp(?int $timestamp): string
+    {
+        if ($timestamp === null || $timestamp <= 0) {
+            return '-';
+        }
+
+        return date('Y-m-d H:i', $timestamp);
+    }
+
+    private function formatCachedWindowPercent(?CachedRateLimitWindow $window): string
+    {
+        if ($window === null) {
+            return '-';
+        }
+
+        return $this->formatPercent($window->leftPercent) . '%';
+    }
+
+    private function formatAvailabilityReason(string $reason, ?string $error): string
+    {
+        if ($error === null || $error === '') {
+            return $reason;
+        }
+
+        return $reason . ' (' . $error . ')';
     }
 }

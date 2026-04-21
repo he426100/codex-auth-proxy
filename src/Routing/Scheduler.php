@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CodexAuthProxy\Routing;
 
 use CodexAuthProxy\Account\CodexAccount;
+use CodexAuthProxy\Usage\AccountAvailability;
 use RuntimeException;
 
 final class Scheduler
@@ -100,11 +101,14 @@ final class Scheduler
 
     private function isAvailable(CodexAccount $account): bool
     {
-        if (!$account->enabled()) {
-            return false;
-        }
+        $availability = AccountAvailability::from(
+            $account,
+            $this->state->cooldownUntil($account->accountId()),
+            $this->state->accountUsage($account->accountId()),
+            $this->now(),
+        );
 
-        return $this->state->cooldownUntil($account->accountId()) <= $this->now();
+        return $availability->routable;
     }
 
     private function now(): int

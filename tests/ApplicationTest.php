@@ -213,16 +213,132 @@ final class ApplicationTest extends TestCase
             'tokens' => $this->accountFixture('alpha')['tokens'],
         ]);
 
+        mkdir($home . '/.config/codex-auth-proxy', 0700, true);
+        $this->writeJson($home . '/.config/codex-auth-proxy/state.json', [
+            'accounts' => [
+                'acct-alpha' => [
+                    'cooldown_until' => 1776756600,
+                ],
+            ],
+            'usage' => [
+                'acct-alpha' => [
+                    'plan_type' => 'plus',
+                    'checked_at' => 1776753000,
+                    'error' => 'stale cache',
+                    'primary' => [
+                        'used_percent' => 93.0,
+                        'left_percent' => 7.0,
+                        'window_minutes' => 300,
+                        'resets_at' => 1776756600,
+                    ],
+                    'secondary' => [
+                        'used_percent' => 15.0,
+                        'left_percent' => 85.0,
+                        'window_minutes' => 10080,
+                        'resets_at' => 1777338600,
+                    ],
+                ],
+            ],
+        ]);
+
+        $usageClient = new CountingUsageClient();
+        $application = new Application($home, usageClient: $usageClient);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $source]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute([]);
+
+        self::assertSame(0, $code);
+        self::assertSame(0, $usageClient->calls);
+        self::assertStringContainsString('alpha', $tester->getDisplay());
+        self::assertStringContainsString('alpha@example.com', $tester->getDisplay());
+        self::assertStringContainsString('Plus', $tester->getDisplay());
+        self::assertStringContainsString('7%', $tester->getDisplay());
+        self::assertStringContainsString('85%', $tester->getDisplay());
+        self::assertStringContainsString('yes', $tester->getDisplay());
+        self::assertStringContainsString('stale cache', $tester->getDisplay());
+    }
+
+    public function testAccountsListWithoutUsageCacheFallsBackToAccountMetadata(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $source = $home . '/auth.json';
+        $this->writeJson($source, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+
         $application = new Application($home);
         (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $source]);
 
         $tester = new CommandTester($application->find('accounts'));
-        $code = $tester->execute(['action' => 'list']);
+        $code = $tester->execute([]);
 
         self::assertSame(0, $code);
         self::assertStringContainsString('alpha', $tester->getDisplay());
         self::assertStringContainsString('alpha@example.com', $tester->getDisplay());
         self::assertStringContainsString('Plus', $tester->getDisplay());
+    }
+
+    public function testAccountsListJsonUsesStructuredFields(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $source = $home . '/auth.json';
+        $this->writeJson($source, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+
+        mkdir($home . '/.config/codex-auth-proxy', 0700, true);
+        $this->writeJson($home . '/.config/codex-auth-proxy/state.json', [
+            'accounts' => [
+                'acct-alpha' => [
+                    'cooldown_until' => 1776756600,
+                ],
+            ],
+            'usage' => [
+                'acct-alpha' => [
+                    'plan_type' => 'plus',
+                    'checked_at' => 1776753000,
+                    'error' => 'cached failure',
+                    'primary' => [
+                        'used_percent' => 93.0,
+                        'left_percent' => 7.0,
+                        'window_minutes' => 300,
+                        'resets_at' => 1776756600,
+                    ],
+                    'secondary' => [
+                        'used_percent' => 15.0,
+                        'left_percent' => 85.0,
+                        'window_minutes' => 10080,
+                        'resets_at' => 1777338600,
+                    ],
+                ],
+            ],
+        ]);
+
+        $application = new Application($home);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $source]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute(['--json' => true]);
+
+        $payload = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame(0, $code);
+        self::assertIsArray($payload);
+        self::assertCount(1, $payload);
+        self::assertTrue($payload[0]['enabled']);
+        self::assertSame(1776756600, $payload[0]['cooldown_until']);
+        self::assertEquals(7.0, $payload[0]['primary_left_percent']);
+        self::assertSame('ok', $payload[0]['availability_reason']);
+        self::assertSame('cached failure', $payload[0]['error']);
+        self::assertIsBool($payload[0]['enabled']);
+        self::assertIsInt($payload[0]['cooldown_until']);
+        self::assertTrue(is_int($payload[0]['primary_left_percent']) || is_float($payload[0]['primary_left_percent']));
+        self::assertIsString($payload[0]['availability_reason']);
+        self::assertIsString($payload[0]['error']);
+        self::assertNotSame('yes', $payload[0]['enabled']);
+        self::assertNotSame('7%', $payload[0]['primary_left_percent']);
     }
 
     public function testAccountsStatusShowsAccountPlanAndQuota(): void
@@ -249,6 +365,77 @@ final class ApplicationTest extends TestCase
         self::assertStringContainsString('Account: alpha@example.com (Plus)', $tester->getDisplay());
         self::assertStringContainsString('5h limit: 7% left', $tester->getDisplay());
         self::assertStringContainsString('Weekly limit: 85% left', $tester->getDisplay());
+
+        $state = json_decode((string) file_get_contents($home . '/.config/codex-auth-proxy/state.json'), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame('plus', $state['usage']['acct-alpha']['plan_type']);
+        self::assertEquals(7.0, $state['usage']['acct-alpha']['primary']['left_percent']);
+        self::assertNull($state['usage']['acct-alpha']['error']);
+    }
+
+    public function testAccountsRefreshWritesUsageCacheAndErrorMetadata(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $alphaSource = $home . '/alpha.json';
+        $betaSource = $home . '/beta.json';
+        $this->writeJson($alphaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+        $this->writeJson($betaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('beta')['tokens'],
+        ]);
+
+        $usageClient = new NamedUsageClient([
+            'alpha' => new AccountUsage(
+                'plus',
+                new RateLimitWindow(93.0, 300, 1776756600),
+                new RateLimitWindow(15.0, 10080, 1777338600),
+            ),
+            'beta' => new RuntimeException('backend timeout'),
+        ]);
+        $application = new Application($home, usageClient: $usageClient);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $alphaSource]);
+        (new CommandTester($application->find('import')))->execute(['name' => 'beta', '--from' => $betaSource]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute(['action' => 'refresh']);
+
+        $state = json_decode((string) file_get_contents($home . '/.config/codex-auth-proxy/state.json'), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame(1, $code);
+        self::assertSame('plus', $state['usage']['acct-alpha']['plan_type']);
+        self::assertEquals(7.0, $state['usage']['acct-alpha']['primary']['left_percent']);
+        self::assertSame('backend timeout', $state['usage']['acct-beta']['error']);
+        self::assertNull($state['usage']['acct-beta']['primary']);
+        self::assertNull($state['usage']['acct-beta']['secondary']);
+        self::assertStringContainsString('alpha', $tester->getDisplay());
+        self::assertStringContainsString('success', $tester->getDisplay());
+        self::assertStringContainsString('beta', $tester->getDisplay());
+        self::assertStringContainsString('failure', $tester->getDisplay());
+    }
+
+    public function testAccountsStatusWritesErrorMetadataOnFailure(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $source = $home . '/auth.json';
+        $this->writeJson($source, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+
+        $usageClient = new NamedUsageClient([
+            'alpha' => new RuntimeException('usage endpoint unavailable'),
+        ]);
+        $application = new Application($home, usageClient: $usageClient);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $source]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute(['action' => 'status', 'name' => 'alpha']);
+
+        $state = json_decode((string) file_get_contents($home . '/.config/codex-auth-proxy/state.json'), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame(1, $code);
+        self::assertSame('usage endpoint unavailable', $state['usage']['acct-alpha']['error']);
+        self::assertStringContainsString('Status: unavailable (usage endpoint unavailable)', $tester->getDisplay());
     }
 
     public function testAccountsStatusRefreshesInvalidatedTokenAndRetries(): void
@@ -371,6 +558,36 @@ final class FakeUsageClient implements UsageClient
     public function fetch(\CodexAuthProxy\Account\CodexAccount $account): AccountUsage
     {
         return $this->usage;
+    }
+}
+
+final class CountingUsageClient implements UsageClient
+{
+    public int $calls = 0;
+
+    public function fetch(\CodexAuthProxy\Account\CodexAccount $account): AccountUsage
+    {
+        $this->calls++;
+
+        throw new RuntimeException('live usage should not be called');
+    }
+}
+
+final class NamedUsageClient implements UsageClient
+{
+    /** @param array<string,AccountUsage|RuntimeException> $results */
+    public function __construct(private readonly array $results)
+    {
+    }
+
+    public function fetch(\CodexAuthProxy\Account\CodexAccount $account): AccountUsage
+    {
+        $result = $this->results[$account->name()] ?? new RuntimeException('missing fake result');
+        if ($result instanceof RuntimeException) {
+            throw $result;
+        }
+
+        return $result;
     }
 }
 

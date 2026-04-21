@@ -90,10 +90,18 @@ bin/codex-auth-proxy login account-c
 
 ## 账号管理和额度查询
 
-查看已导入账号，包含账号名、邮箱、账号等级和 ChatGPT account id：
+查看已导入账号及本地缓存的冷却时间、额度可用性：
 
 ```bash
+bin/codex-auth-proxy accounts
 bin/codex-auth-proxy accounts list
+```
+
+刷新本地缓存的额度状态：
+
+```bash
+bin/codex-auth-proxy accounts refresh
+bin/codex-auth-proxy accounts refresh account-a
 ```
 
 查询账号额度：
@@ -102,6 +110,10 @@ bin/codex-auth-proxy accounts list
 bin/codex-auth-proxy accounts status
 bin/codex-auth-proxy accounts status account-a
 ```
+
+`accounts` 只展示本地缓存里的冷却时间和额度可用性，不会额外拉取远端状态。
+
+`accounts refresh` 会复用现有的 usage reader 读取实时 Codex quota，然后更新本地 state cache。可以针对单个账号刷新，也可以不带账号名一次刷新全部账号。
 
 `status` 会为目标账号创建临时隔离的 `CODEX_HOME`，写入该账号的 `auth.json`，再调用本机 `codex app-server` 的 `account/rateLimits/read` 方法查询 Codex 额度。这样使用 Codex CLI 自己的额度读取逻辑，不依赖本项目猜测远端 usage URL。
 
@@ -181,7 +193,7 @@ openai_base_url = "http://127.0.0.1:1456/v1"
 bin/codex-auth-proxy serve --port=1456
 ```
 
-之后 Codex CLI 会请求本地代理，由代理选择账号并转发到 ChatGPT Codex backend。
+之后 Codex CLI 会请求本地代理，由代理选择账号并转发到 ChatGPT Codex backend。`serve` 仍然只走直连上游代理路径，只利用缓存里的可用性和冷却时间做账号选择，不依赖主请求路径上的 `app-server`。
 
 ## 配置项
 
