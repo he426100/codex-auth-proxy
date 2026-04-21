@@ -30,6 +30,7 @@ final class CodexProxyServerTest extends TestCase
         $options = $this->clientOptionsFor($server, 'chatgpt.com', ['timeout' => -1]);
 
         self::assertSame(-1, $options['timeout']);
+        self::assertSame('chatgpt.com', $options['ssl_host_name']);
         self::assertSame('secure-proxy.local', $options['http_proxy_host']);
         self::assertSame(8443, $options['http_proxy_port']);
     }
@@ -51,7 +52,10 @@ final class CodexProxyServerTest extends TestCase
 
         $options = $this->clientOptionsFor($server, 'chatgpt.com', ['timeout' => -1]);
 
-        self::assertSame(['timeout' => -1], $options);
+        self::assertSame([
+            'timeout' => -1,
+            'ssl_host_name' => 'chatgpt.com',
+        ], $options);
     }
 
     /** @param array<string,string|int> $baseOptions */

@@ -56,6 +56,7 @@ final class CodexProxyServer
         $classifier = new ErrorClassifier($this->defaultCooldownSeconds);
         $extractor = new SessionKeyExtractor();
         $headers = new UpstreamHeaderFactory($this->codexUserAgent, $this->codexBetaFeatures);
+        $payloadNormalizer = new ResponsesPayloadNormalizer();
         $normalizer = new ResponsesWebSocketNormalizer();
         $retryTracker = new WebSocketRetryTracker();
         $this->activeLogger->info('Loaded Codex accounts', ['count' => count($accounts)]);
@@ -96,8 +97,8 @@ final class CodexProxyServer
             }
         });
 
-        $server->on('request', function (Request $request, Response $response) use ($scheduler, $classifier, $repository, $extractor, $headers): void {
-            $this->handleHttp($request, $response, $scheduler, $classifier, $repository, $extractor, $headers);
+        $server->on('request', function (Request $request, Response $response) use ($scheduler, $classifier, $repository, $extractor, $headers, $payloadNormalizer): void {
+            $this->handleHttp($request, $response, $scheduler, $classifier, $repository, $extractor, $headers, $payloadNormalizer);
         });
 
         $server->start();
@@ -111,6 +112,7 @@ final class CodexProxyServer
         AccountRepository $repository,
         SessionKeyExtractor $extractor,
         UpstreamHeaderFactory $headers,
+        ResponsesPayloadNormalizer $payloadNormalizer,
     ): void {
         $path = $request->server['request_uri'] ?? '/';
         if ($path === '/health') {
@@ -119,8 +121,9 @@ final class CodexProxyServer
             return;
         }
 
-        $body = $request->rawContent() ?: '';
-        $sessionKey = $extractor->extract($request->header ?? [], $body);
+        $rawBody = $request->rawContent() ?: '';
+        $sessionKey = $extractor->extract($request->header ?? [], $rawBody);
+        $body = $payloadNormalizer->normalizeHttp($rawBody);
         $account = $this->freshAccount($scheduler->accountForSession($sessionKey->primary, $sessionKey->fallback), $repository, $scheduler);
         $result = $this->forward($request, $response, $account, $body, $headers, false);
         $classification = $classifier->classify($result['status'], $result['body'], $result['headers']);
@@ -317,6 +320,7 @@ final class CodexProxyServer
      */
     private function clientOptionsFor(string $host, array $baseOptions): array
     {
+        $baseOptions['ssl_host_name'] = $host;
         $proxyOptions = $this->outboundProxyConfig?->swooleOptionsFor($host) ?? [];
 
         return array_merge($baseOptions, $proxyOptions);
