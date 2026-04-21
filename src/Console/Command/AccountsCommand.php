@@ -9,6 +9,7 @@ use CodexAuthProxy\Account\CodexAccount;
 use CodexAuthProxy\Auth\TokenRefresher;
 use CodexAuthProxy\Config\AppConfig;
 use CodexAuthProxy\Config\AppConfigLoader;
+use CodexAuthProxy\Network\OutboundProxyConfig;
 use CodexAuthProxy\Routing\StateStore;
 use CodexAuthProxy\Usage\AccountAvailability;
 use CodexAuthProxy\Usage\AccountUsage;
@@ -166,7 +167,8 @@ final class AccountsCommand extends ProxyCommand
     private function fetchLiveUsageResults(AccountRepository $repository, AppConfig $config, ?string $name): array
     {
         $accounts = $this->selectedAccounts($repository, $name);
-        $client = $this->usageClient ?? new CodexUsageClient();
+        $outboundProxyConfig = OutboundProxyConfig::fromAppConfig($config);
+        $client = $this->usageClient ?? new CodexUsageClient(proxyEnv: $outboundProxyConfig->environment());
         $state = StateStore::file($config->stateFile);
         $results = [];
 
@@ -174,14 +176,14 @@ final class AccountsCommand extends ProxyCommand
             $checkedAt = time();
 
             try {
-                $account = $this->refreshAccountIfNeeded($repository, $account);
+                $account = $this->refreshAccountIfNeeded($repository, $account, $config);
                 $usage = $client->fetch($account);
                 $state->setAccountUsage($account->accountId(), CachedAccountUsage::fromLive($usage, $checkedAt));
                 $results[] = ['account' => $account, 'usage' => $usage, 'error' => null];
             } catch (InvalidArgumentException|RuntimeException $exception) {
                 if ($exception instanceof RuntimeException && $this->isInvalidatedTokenFailure($exception)) {
                     try {
-                        $account = $this->refreshAccount($repository, $account);
+                        $account = $this->refreshAccount($repository, $account, $config);
                         $usage = $client->fetch($account);
                         $state->setAccountUsage($account->accountId(), CachedAccountUsage::fromLive($usage, $checkedAt));
                         $results[] = ['account' => $account, 'usage' => $usage, 'error' => null];
@@ -244,9 +246,9 @@ final class AccountsCommand extends ProxyCommand
         return [$account];
     }
 
-    private function refreshAccountIfNeeded(AccountRepository $repository, CodexAccount $account): CodexAccount
+    private function refreshAccountIfNeeded(AccountRepository $repository, CodexAccount $account, AppConfig $config): CodexAccount
     {
-        $refresher = $this->tokenRefresher ?? new TokenRefresher();
+        $refresher = $this->tokenRefresher($config);
         $refreshed = $refresher->refreshIfExpiring($account);
         if ($refreshed === null) {
             return $account;
@@ -257,13 +259,18 @@ final class AccountsCommand extends ProxyCommand
         return $refreshed;
     }
 
-    private function refreshAccount(AccountRepository $repository, CodexAccount $account): CodexAccount
+    private function refreshAccount(AccountRepository $repository, CodexAccount $account, AppConfig $config): CodexAccount
     {
-        $refresher = $this->tokenRefresher ?? new TokenRefresher();
+        $refresher = $this->tokenRefresher($config);
         $refreshed = $refresher->refresh($account);
         $repository->saveAccount($refreshed);
 
         return $refreshed;
+    }
+
+    private function tokenRefresher(AppConfig $config): TokenRefresher
+    {
+        return $this->tokenRefresher ?? new TokenRefresher(proxy: OutboundProxyConfig::fromAppConfig($config)->guzzleProxy());
     }
 
     private function isInvalidatedTokenFailure(RuntimeException $exception): bool

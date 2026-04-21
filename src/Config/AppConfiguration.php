@@ -27,6 +27,9 @@ final class AppConfiguration implements ConfigurationInterface
                 ->scalarNode('log_level')->defaultValue('warning')->cannotBeEmpty()->end()
                 ->scalarNode('codex_user_agent')->defaultValue('codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0')->end()
                 ->scalarNode('codex_beta_features')->defaultValue('multi_agent')->end()
+                ->scalarNode('http_proxy')->defaultNull()->end()
+                ->scalarNode('https_proxy')->defaultNull()->end()
+                ->scalarNode('no_proxy')->defaultValue('localhost,127.0.0.1,::1')->end()
             ->end();
 
         return $treeBuilder;

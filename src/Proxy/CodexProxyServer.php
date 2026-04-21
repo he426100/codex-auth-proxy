@@ -7,6 +7,7 @@ namespace CodexAuthProxy\Proxy;
 use CodexAuthProxy\Account\AccountRepository;
 use CodexAuthProxy\Account\CodexAccount;
 use CodexAuthProxy\Auth\TokenRefresher;
+use CodexAuthProxy\Network\OutboundProxyConfig;
 use CodexAuthProxy\Routing\ErrorClassifier;
 use CodexAuthProxy\Routing\Scheduler;
 use CodexAuthProxy\Routing\StateStore;
@@ -35,11 +36,12 @@ final class CodexProxyServer
         private readonly string $upstreamBase = 'https://chatgpt.com/backend-api/codex',
         ?LoggerInterface $logger = null,
         ?TokenRefresher $tokenRefresher = null,
+        private readonly ?OutboundProxyConfig $outboundProxyConfig = null,
         private readonly string $codexUserAgent = 'codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0',
         private readonly string $codexBetaFeatures = 'multi_agent',
     ) {
         $this->activeLogger = $logger ?? new NullLogger();
-        $this->activeTokenRefresher = $tokenRefresher ?? new TokenRefresher();
+        $this->activeTokenRefresher = $tokenRefresher ?? new TokenRefresher(proxy: $outboundProxyConfig?->guzzleProxy() ?? []);
     }
 
     public function start(): void
@@ -202,7 +204,7 @@ final class CodexProxyServer
         $framer = new SseFramer();
 
         $client = new Client($host, $port, $ssl);
-        $client->set([
+        $client->set($this->clientOptionsFor($host, [
             'timeout' => -1,
             'write_func' => function (Client $client, string $chunk) use (&$buffer, &$headersSent, &$streamed, &$streamErrorBuffered, $response, $forceBuffer, $framer): int {
                 if ($forceBuffer || $client->statusCode >= 400 || $streamErrorBuffered) {
@@ -237,7 +239,7 @@ final class CodexProxyServer
 
                 return strlen($chunk);
             },
-        ]);
+        ]));
         $client->setHeaders($headers->build($request->header ?? [], $account, $host, false));
         $client->setMethod(strtoupper((string) ($request->server['request_method'] ?? 'GET')));
         if ($body !== '') {
@@ -290,7 +292,7 @@ final class CodexProxyServer
         $target = new UpstreamTarget($this->upstreamBase);
         [$host, $port, $ssl] = $target->endpoint();
         $client = new Client($host, $port, $ssl);
-        $client->set(['timeout' => -1]);
+        $client->set($this->clientOptionsFor($host, ['timeout' => -1]));
         $client->setHeaders($headers->build($request->header ?? [], $account, $host, true));
         $path = $target->pathFor((string) ($request->server['request_uri'] ?? '/v1/responses'));
         if (!$client->upgrade($path) || (int) $client->statusCode !== 101) {
@@ -301,6 +303,17 @@ final class CodexProxyServer
         }
 
         return $client;
+    }
+
+    /**
+     * @param array<string,string|int|callable> $baseOptions
+     * @return array<string,string|int|callable>
+     */
+    private function clientOptionsFor(string $host, array $baseOptions): array
+    {
+        $proxyOptions = $this->outboundProxyConfig?->swooleOptionsFor($host) ?? [];
+
+        return array_merge($baseOptions, $proxyOptions);
     }
 
     /**

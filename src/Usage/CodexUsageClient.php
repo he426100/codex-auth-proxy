@@ -17,6 +17,8 @@ final class CodexUsageClient implements UsageClient
         ?UsageResponseParser $parser = null,
         private readonly int $timeoutSeconds = 30,
         private readonly ?string $tempRoot = null,
+        /** @var array<string,string> */
+        private readonly array $proxyEnv = [],
     ) {
         $this->parser = $parser ?? new UsageResponseParser();
     }
@@ -176,6 +178,12 @@ final class CodexUsageClient implements UsageClient
     {
         $env = getenv();
         $env['CODEX_HOME'] = $codexHome;
+        foreach (['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] as $key) {
+            unset($env[$key]);
+        }
+        foreach ($this->proxyEnv as $key => $value) {
+            $env[$key] = $value;
+        }
 
         return $env;
     }

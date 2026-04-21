@@ -15,8 +15,8 @@ final class ConfigCommand extends ProxyCommand
     protected function configure(): void
     {
         $this
-            ->addOption('host', null, InputOption::VALUE_REQUIRED, 'Proxy listen host')
-            ->addOption('port', null, InputOption::VALUE_REQUIRED, 'Proxy listen port');
+            ->addOption('host', null, InputOption::VALUE_REQUIRED, 'Proxy listen host (default: 127.0.0.1)')
+            ->addOption('port', null, InputOption::VALUE_REQUIRED, 'Proxy listen port (default: 1456)');
         $this->addPathOptions();
     }
 

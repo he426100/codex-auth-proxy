@@ -197,19 +197,32 @@ bin/codex-auth-proxy serve --port=1456
 
 ## 配置项
 
-运行时配置可以通过 CLI 参数或 `.env` 覆盖：
+运行时默认值保存在 `config/defaults.php`。配置文件内部使用类似 Hyperf 的 `env('NAME', $default)` 方式读取项目环境变量。需要本地覆盖时，可以复制 `.env.example` 为 `.env`；`.env` 是本地文件，不应提交。
+
+运行时配置可以通过命令暴露的 CLI 参数，或 `CODEX_AUTH_PROXY_*` `.env` 变量覆盖：
 
 ```dotenv
 CODEX_AUTH_PROXY_HOST=127.0.0.1
 CODEX_AUTH_PROXY_PORT=1456
+CODEX_AUTH_PROXY_COOLDOWN_SECONDS=18000
 CODEX_AUTH_PROXY_CALLBACK_HOST=localhost
 CODEX_AUTH_PROXY_CALLBACK_PORT=1455
+CODEX_AUTH_PROXY_CALLBACK_TIMEOUT_SECONDS=300
 CODEX_AUTH_PROXY_ACCOUNTS_DIR=/home/me/.config/codex-auth-proxy/accounts
 CODEX_AUTH_PROXY_STATE_FILE=/home/me/.config/codex-auth-proxy/state.json
 CODEX_AUTH_PROXY_LOG_LEVEL=warning
 CODEX_AUTH_PROXY_CODEX_USER_AGENT="codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0"
 CODEX_AUTH_PROXY_CODEX_BETA_FEATURES=multi_agent
+CODEX_AUTH_PROXY_HTTP_PROXY=http://127.0.0.1:7890
+CODEX_AUTH_PROXY_HTTPS_PROXY=http://127.0.0.1:7890
+CODEX_AUTH_PROXY_NO_PROXY=localhost,127.0.0.1,::1
 ```
+
+本项目只读取上面的项目专用代理变量，不会把 shell 里的 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 或小写变体当作应用配置，避免系统环境变量意外改变本工具行为。
+
+出站代理配置会作用于 OAuth token exchange、token refresh、`serve` 上游 HTTP/SSE 和 WebSocket 连接，以及 `accounts status` / `accounts refresh` 调用 `codex app-server` 的路径。对于 `codex app-server` 子进程，本工具会先清理 shell 环境里的标准代理变量，再把解析后的项目代理配置显式导出为标准 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 环境变量。
+
+`CODEX_AUTH_PROXY_NO_PROXY` 支持精确 host/IP、`localhost`、loopback 地址、带端口的 host、`*`，以及 `openai.com` 或 `.openai.com` 形式的域名后缀匹配。
 
 ## 路由策略
 

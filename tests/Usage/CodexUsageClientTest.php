@@ -76,4 +76,118 @@ PHP);
         self::assertSame(15.0, $usage->secondary?->usedPercent);
         self::assertCount(0, glob($dir . '/codex-home-*') ?: []);
     }
+
+    public function testFetchInjectsConfiguredProxyEnvironmentIntoCodexAppServer(): void
+    {
+        $dir = $this->tempDir('cap-codex-app-server-proxy');
+        $fakeCodex = $dir . '/fake-codex';
+        file_put_contents($fakeCodex, <<<'PHP'
+#!/usr/bin/env php
+<?php
+if (getenv('HTTP_PROXY') !== 'http://proxy.local:8080') {
+    fwrite(STDERR, "missing HTTP_PROXY\n");
+    exit(6);
+}
+if (getenv('HTTPS_PROXY') !== 'http://secure-proxy.local:8443') {
+    fwrite(STDERR, "missing HTTPS_PROXY\n");
+    exit(7);
+}
+if (getenv('NO_PROXY') !== 'localhost,127.0.0.1') {
+    fwrite(STDERR, "missing NO_PROXY\n");
+    exit(8);
+}
+while (($line = fgets(STDIN)) !== false) {
+    $message = json_decode($line, true);
+    if (($message['method'] ?? '') === 'initialize') {
+        echo json_encode(['id' => $message['id'], 'result' => []]) . "\n";
+        continue;
+    }
+    echo json_encode(['id' => $message['id'], 'result' => [
+        'rateLimits' => [
+            'primary' => ['usedPercent' => 10.0, 'windowDurationMins' => 300, 'resetsAt' => null],
+            'secondary' => null,
+            'planType' => 'plus',
+        ],
+    ]]) . "\n";
+}
+PHP);
+        chmod($fakeCodex, 0700);
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+
+        $usage = (new CodexUsageClient(
+            $fakeCodex,
+            timeoutSeconds: 1,
+            tempRoot: $dir,
+            proxyEnv: [
+                'HTTP_PROXY' => 'http://proxy.local:8080',
+                'HTTPS_PROXY' => 'http://secure-proxy.local:8443',
+                'NO_PROXY' => 'localhost,127.0.0.1',
+            ],
+        ))->fetch($account);
+
+        self::assertSame('plus', $usage->planType);
+        self::assertSame(10.0, $usage->primary?->usedPercent);
+    }
+
+    public function testFetchDoesNotLeakParentProcessProxyEnvironmentIntoCodexAppServer(): void
+    {
+        $snapshot = [
+            'HTTP_PROXY' => getenv('HTTP_PROXY') === false ? null : getenv('HTTP_PROXY'),
+            'HTTPS_PROXY' => getenv('HTTPS_PROXY') === false ? null : getenv('HTTPS_PROXY'),
+            'http_proxy' => getenv('http_proxy') === false ? null : getenv('http_proxy'),
+            'https_proxy' => getenv('https_proxy') === false ? null : getenv('https_proxy'),
+        ];
+        $dir = $this->tempDir('cap-codex-app-server-proxy-isolation');
+        $fakeCodex = $dir . '/fake-codex';
+        file_put_contents($fakeCodex, <<<'PHP'
+#!/usr/bin/env php
+<?php
+foreach (['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'] as $name) {
+    $value = getenv($name);
+    if ($value !== false && $value !== '') {
+        fwrite(STDERR, "leaked $name\n");
+        exit(9);
+    }
+}
+if (getenv('NO_PROXY') !== 'localhost') {
+    fwrite(STDERR, "missing explicit NO_PROXY\n");
+    exit(10);
+}
+while (($line = fgets(STDIN)) !== false) {
+    $message = json_decode($line, true);
+    echo json_encode(['id' => $message['id'], 'result' => [
+        'rateLimits' => [
+            'primary' => ['usedPercent' => 10.0, 'windowDurationMins' => 300, 'resetsAt' => null],
+            'secondary' => null,
+            'planType' => 'plus',
+        ],
+    ]]) . "\n";
+}
+PHP);
+        chmod($fakeCodex, 0700);
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+
+        try {
+            foreach (array_keys($snapshot) as $name) {
+                putenv($name . '=http://standard-proxy.local:8080');
+            }
+
+            $usage = (new CodexUsageClient(
+                $fakeCodex,
+                timeoutSeconds: 1,
+                tempRoot: $dir,
+                proxyEnv: ['NO_PROXY' => 'localhost'],
+            ))->fetch($account);
+
+            self::assertSame('plus', $usage->planType);
+        } finally {
+            foreach ($snapshot as $name => $value) {
+                if ($value === null) {
+                    putenv($name);
+                    continue;
+                }
+                putenv($name . '=' . $value);
+            }
+        }
+    }
 }

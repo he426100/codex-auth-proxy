@@ -16,6 +16,7 @@ use CodexAuthProxy\Logging\LoggerFactory;
 use CodexAuthProxy\OAuth\CallbackServer;
 use CodexAuthProxy\OAuth\CodexOAuthClient;
 use CodexAuthProxy\OAuth\CodexOAuthHttpClient;
+use CodexAuthProxy\Network\OutboundProxyConfig;
 use CodexAuthProxy\OAuth\LoopbackCallbackServer;
 use CodexAuthProxy\Usage\UsageClient;
 use GuzzleHttp\Client;
@@ -36,8 +37,9 @@ final class Application extends SymfonyApplication
 
         $configLoader ??= new AppConfigLoader($home);
         $config = $configLoader->load();
+        $outboundProxyConfig = OutboundProxyConfig::fromAppConfig($config);
         $logger ??= LoggerFactory::create($config->logLevel);
-        $oauthClient ??= new CodexOAuthHttpClient(new Client(['timeout' => 30]));
+        $oauthClient ??= new CodexOAuthHttpClient(new Client(['timeout' => 30]), $outboundProxyConfig->guzzleProxy());
         $callbackServer ??= new LoopbackCallbackServer();
 
         $this->add(new AccountsCommand($configLoader, $usageClient));

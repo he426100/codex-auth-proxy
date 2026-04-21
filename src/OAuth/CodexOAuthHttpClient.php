@@ -15,7 +15,8 @@ final class CodexOAuthHttpClient implements CodexOAuthClient
     private const TOKEN_URL = 'https://auth.openai.com/oauth/token';
     private const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 
-    public function __construct(private readonly ClientInterface $httpClient)
+    /** @param array<string,mixed> $proxy */
+    public function __construct(private readonly ClientInterface $httpClient, private readonly array $proxy = [])
     {
     }
 
@@ -38,7 +39,7 @@ final class CodexOAuthHttpClient implements CodexOAuthClient
     /** @return array{id_token:string,access_token:string,refresh_token:string} */
     public function exchangeCode(string $code, PkcePair $pkce, string $redirectUri): array
     {
-        $response = $this->httpClient->request('POST', self::TOKEN_URL, [
+        $options = [
             RequestOptions::HTTP_ERRORS => false,
             RequestOptions::HEADERS => [
                 'Accept' => 'application/json',
@@ -51,7 +52,10 @@ final class CodexOAuthHttpClient implements CodexOAuthClient
                 'redirect_uri' => $redirectUri,
                 'code_verifier' => $pkce->verifier(),
             ],
-        ]);
+            RequestOptions::PROXY => $this->proxy,
+        ];
+
+        $response = $this->httpClient->request('POST', self::TOKEN_URL, $options);
 
         $body = (string) $response->getBody();
         if ($response->getStatusCode() !== 200) {

@@ -134,19 +134,32 @@ The proxy supports Codex HTTP/SSE and WebSocket requests. Requests are mapped fr
 
 ## Configuration
 
-Runtime defaults can be overridden with CLI options or `.env` variables:
+Runtime defaults live in `config/defaults.php`. The config file reads project environment variables with `env('NAME', $default)`, similar to Hyperf-style config files. Copy `.env.example` to `.env` when you need local overrides; `.env` is optional and is not committed.
+
+Runtime defaults can be overridden with CLI options where a command exposes them, or with `CODEX_AUTH_PROXY_*` `.env` variables:
 
 ```dotenv
 CODEX_AUTH_PROXY_HOST=127.0.0.1
 CODEX_AUTH_PROXY_PORT=1456
+CODEX_AUTH_PROXY_COOLDOWN_SECONDS=18000
 CODEX_AUTH_PROXY_CALLBACK_HOST=localhost
 CODEX_AUTH_PROXY_CALLBACK_PORT=1455
+CODEX_AUTH_PROXY_CALLBACK_TIMEOUT_SECONDS=300
 CODEX_AUTH_PROXY_ACCOUNTS_DIR=/home/me/.config/codex-auth-proxy/accounts
 CODEX_AUTH_PROXY_STATE_FILE=/home/me/.config/codex-auth-proxy/state.json
 CODEX_AUTH_PROXY_LOG_LEVEL=warning
 CODEX_AUTH_PROXY_CODEX_USER_AGENT="codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0"
 CODEX_AUTH_PROXY_CODEX_BETA_FEATURES=multi_agent
+CODEX_AUTH_PROXY_HTTP_PROXY=http://127.0.0.1:7890
+CODEX_AUTH_PROXY_HTTPS_PROXY=http://127.0.0.1:7890
+CODEX_AUTH_PROXY_NO_PROXY=localhost,127.0.0.1,::1
 ```
+
+The project intentionally reads only the namespaced proxy variables above. It does not treat shell-level `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, or lowercase variants as application configuration.
+
+Outbound proxy settings are applied to OAuth token exchange, token refresh, `serve` upstream HTTP/SSE and WebSocket connections, and `accounts status` / `accounts refresh` when they spawn `codex app-server`. For the `codex app-server` subprocess, shell-level proxy variables are cleared first, then the resolved project proxy settings are exported as standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
+
+`CODEX_AUTH_PROXY_NO_PROXY` supports exact hosts/IPs, `localhost`, loopback addresses, host values with ports, `*`, and suffix matching with either `openai.com` or `.openai.com`.
 
 ## Routing Policy
 

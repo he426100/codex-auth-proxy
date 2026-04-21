@@ -9,6 +9,7 @@ use CodexAuthProxy\Tests\TestCase;
 use CodexAuthProxy\Usage\AccountAvailability;
 use CodexAuthProxy\Usage\CachedAccountUsage;
 use CodexAuthProxy\Usage\CachedRateLimitWindow;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 final class AccountAvailabilityTest extends TestCase
 {
@@ -175,11 +176,8 @@ final class AccountAvailabilityTest extends TestCase
         ];
     }
 
-    /**
-     * @dataProvider availabilityCases
-     *
-     * @param array<string,mixed> $overrides
-     */
+    /** @param array<string,mixed> $overrides */
+    #[DataProvider('availabilityCases')]
     public function testFromRespectsAvailabilityRules(
         string $name,
         array $overrides,

@@ -71,4 +71,23 @@ final class CodexOAuthClientTest extends TestCase
         self::assertSame('code-1', $form['code']);
         self::assertSame('verifier-1', $form['code_verifier']);
     }
+
+    public function testExchangeCodeUsesConfiguredGuzzleProxy(): void
+    {
+        $history = [];
+        $mock = new MockHandler([
+            new Response(200, ['Content-Type' => 'application/json'], json_encode([
+                'id_token' => 'id-token',
+                'access_token' => 'access-token',
+                'refresh_token' => 'refresh-token',
+            ], JSON_THROW_ON_ERROR)),
+        ]);
+        $stack = HandlerStack::create($mock);
+        $stack->push(Middleware::history($history));
+        $client = new CodexOAuthHttpClient(new Client(['handler' => $stack]), ['https' => 'http://proxy.local:8443']);
+
+        $client->exchangeCode('code-1', new PkcePair('verifier-1', 'challenge-1'), 'http://127.0.0.1:1455/auth/callback');
+
+        self::assertSame('http://proxy.local:8443', $history[0]['options']['proxy']['https']);
+    }
 }

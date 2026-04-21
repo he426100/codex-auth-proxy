@@ -20,14 +20,15 @@ final class TokenRefresher
 
     private readonly ClientInterface $httpClient;
 
-    public function __construct(?ClientInterface $httpClient = null)
+    /** @param array<string,mixed> $proxy */
+    public function __construct(?ClientInterface $httpClient = null, private readonly array $proxy = [])
     {
         $this->httpClient = $httpClient ?? new Client(['timeout' => 30]);
     }
 
     public function refresh(CodexAccount $account): CodexAccount
     {
-        $response = $this->httpClient->request('POST', self::TOKEN_URL, [
+        $options = [
             RequestOptions::HTTP_ERRORS => false,
             RequestOptions::HEADERS => [
                 'Accept' => 'application/json',
@@ -39,7 +40,10 @@ final class TokenRefresher
                 'refresh_token' => $account->refreshToken(),
                 'scope' => 'openid profile email',
             ],
-        ]);
+            RequestOptions::PROXY => $this->proxy,
+        ];
+
+        $response = $this->httpClient->request('POST', self::TOKEN_URL, $options);
 
         $status = $response->getStatusCode();
         $body = (string) $response->getBody();

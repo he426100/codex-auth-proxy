@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CodexAuthProxy\Console\Command;
 
 use CodexAuthProxy\Config\AppConfigLoader;
+use CodexAuthProxy\Network\OutboundProxyConfig;
 use CodexAuthProxy\Proxy\CodexProxyServer;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Console\Attribute\AsCommand;
@@ -23,15 +24,16 @@ final class ServeCommand extends ProxyCommand
     protected function configure(): void
     {
         $this
-            ->addOption('host', null, InputOption::VALUE_REQUIRED, 'Proxy listen host')
-            ->addOption('port', null, InputOption::VALUE_REQUIRED, 'Proxy listen port')
-            ->addOption('cooldown', null, InputOption::VALUE_REQUIRED, 'Default cooldown seconds after quota errors');
+            ->addOption('host', null, InputOption::VALUE_REQUIRED, 'Proxy listen host (default: 127.0.0.1)')
+            ->addOption('port', null, InputOption::VALUE_REQUIRED, 'Proxy listen port (default: 1456)')
+            ->addOption('cooldown', null, InputOption::VALUE_REQUIRED, 'Default cooldown seconds after quota errors (default: 18000)');
         $this->addPathOptions();
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $config = $this->appConfig($input);
+        $outboundProxyConfig = OutboundProxyConfig::fromAppConfig($config);
         $output->writeln("Starting Codex auth proxy on http://{$config->host}:{$config->port}");
         $this->logger->info('Starting Codex auth proxy', ['host' => $config->host, 'port' => $config->port]);
 
@@ -42,6 +44,7 @@ final class ServeCommand extends ProxyCommand
             stateFile: $config->stateFile,
             defaultCooldownSeconds: $config->cooldownSeconds,
             logger: $this->logger,
+            outboundProxyConfig: $outboundProxyConfig,
             codexUserAgent: $config->codexUserAgent,
             codexBetaFeatures: $config->codexBetaFeatures,
         ))->start();
