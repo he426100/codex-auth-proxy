@@ -33,7 +33,7 @@
   ],
   "scripts": {
     "test": "phpunit",
-    "analyse": "phpstan analyse",
+    "analyse": "phpstan analyse --memory-limit 500M -l 5 -c phpstan.neon.dist ./src",
     "box:validate": "box validate",
     "build:phar": "php -d phar.readonly=0 vendor/bin/box compile"
   }
