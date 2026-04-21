@@ -200,43 +200,18 @@ final class CodexProxyServer
     {
         $target = new UpstreamTarget($this->upstreamBase);
         [$host, $port, $ssl] = $target->endpoint();
-        $buffer = '';
         $headersSent = false;
-        $streamed = false;
-        $streamErrorBuffered = false;
-        $framer = new SseFramer();
+        $bodyBuffer = new UpstreamResponseBodyBuffer($forceBuffer);
 
         $client = new Client($host, $port, $ssl);
         $client->set($this->clientOptionsFor($host, [
             'timeout' => -1,
-            'write_func' => function (Client $client, string $chunk) use (&$buffer, &$headersSent, &$streamed, &$streamErrorBuffered, $response, $forceBuffer, $framer): int {
-                if ($forceBuffer || $client->statusCode >= 400 || $streamErrorBuffered) {
-                    $buffer .= $chunk;
-                    return strlen($chunk);
-                }
-
-                if (!$this->isSse($client->headers ?? [])) {
+            'write_func' => function (Client $client, string $chunk) use (&$headersSent, $response, $bodyBuffer): int {
+                foreach ($bodyBuffer->write((int) $client->statusCode, $client->headers ?? [], $chunk) as $frame) {
                     if (!$headersSent) {
                         $this->copyResponseHeaders($response, $client->headers ?? [], $client->statusCode);
                         $headersSent = true;
                     }
-                    $streamed = true;
-                    $response->write($chunk);
-                    return strlen($chunk);
-                }
-
-                foreach ($framer->write($chunk) as $frame) {
-                    if (!$headersSent) {
-                        $errorBody = StreamErrorDetector::errorBody($frame);
-                        if ($errorBody !== null) {
-                            $streamErrorBuffered = true;
-                            $buffer .= $errorBody;
-                            continue;
-                        }
-                        $this->copyResponseHeaders($response, $client->headers ?? [], $client->statusCode);
-                        $headersSent = true;
-                    }
-                    $streamed = true;
                     $response->write($frame);
                 }
 
@@ -253,23 +228,23 @@ final class CodexProxyServer
         $client->execute($path);
         $status = (int) ($client->statusCode ?: 502);
         $responseHeaders = is_array($client->headers ?? null) ? $client->headers : [];
+        $buffer = $bodyBuffer->body();
         if ($client->statusCode === -1) {
             $buffer = $this->upstreamClientError('HTTP request', $client);
         }
-        if (!$streamed && !$streamErrorBuffered) {
-            foreach ($framer->flush() as $frame) {
+        if (!$bodyBuffer->streamed()) {
+            foreach ($bodyBuffer->flush($responseHeaders) as $frame) {
                 if (!$headersSent) {
                     $this->copyResponseHeaders($response, $responseHeaders, $status);
                     $headersSent = true;
                 }
-                $streamed = true;
                 $response->write($frame);
             }
         }
-        if (!$streamed && $buffer === '' && is_string($client->body ?? null)) {
+        if (!$bodyBuffer->streamed() && $buffer === '' && is_string($client->body ?? null)) {
             $buffer = $client->body;
         }
-        if ($streamed) {
+        if ($bodyBuffer->streamed()) {
             $response->end();
         }
         $client->close();
@@ -278,7 +253,7 @@ final class CodexProxyServer
             'status' => $status,
             'body' => $buffer,
             'headers' => $responseHeaders,
-            'streamed' => $streamed,
+            'streamed' => $bodyBuffer->streamed(),
         ];
     }
 
@@ -451,18 +426,6 @@ final class CodexProxyServer
             }
             $response->header((string) $key, (string) $value);
         }
-    }
-
-    /** @param array<string,string> $headers */
-    private function isSse(array $headers): bool
-    {
-        foreach ($headers as $key => $value) {
-            if (strtolower((string) $key) === 'content-type' && str_contains(strtolower((string) $value), 'text/event-stream')) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
 }

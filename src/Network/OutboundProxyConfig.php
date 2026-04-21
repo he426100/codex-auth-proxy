@@ -59,6 +59,9 @@ final class OutboundProxyConfig
         if (!is_array($parts) || !isset($parts['host'], $parts['port'])) {
             throw new InvalidArgumentException('Invalid proxy URL: ' . $proxy);
         }
+        if (($parts['scheme'] ?? null) !== 'http') {
+            throw new InvalidArgumentException('Swoole upstream proxy requires an http:// proxy URL: ' . $proxy);
+        }
 
         $options = [
             'http_proxy_host' => (string) $parts['host'],

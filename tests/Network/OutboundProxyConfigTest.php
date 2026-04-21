@@ -34,7 +34,7 @@ final class OutboundProxyConfigTest extends TestCase
         self::assertSame('pass', $options['http_proxy_password']);
     }
 
-    public function testUsesHttpsProxyForSwooleWhenConfigured(): void
+    public function testUsesConfiguredHttpsProxySlotForSwooleWhenProxyUsesHttpScheme(): void
     {
         $config = $this->config('http://proxy.local:8080', 'http://secure.local:8443', '');
 
@@ -42,6 +42,16 @@ final class OutboundProxyConfigTest extends TestCase
 
         self::assertSame('secure.local', $options['http_proxy_host']);
         self::assertSame(8443, $options['http_proxy_port']);
+    }
+
+    public function testRejectsHttpsProxySchemeForSwoole(): void
+    {
+        $proxy = OutboundProxyConfig::fromAppConfig($this->config(null, 'https://secure.local:8443', ''));
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Swoole upstream proxy requires an http:// proxy URL');
+
+        $proxy->swooleOptionsFor('chatgpt.com');
     }
 
     public function testBypassesHostsListedInNoProxy(): void

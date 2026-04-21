@@ -31,6 +31,23 @@ final class ErrorClassifierTest extends TestCase
 
         self::assertSame('auth', $classification->type());
         self::assertTrue($classification->hardSwitch());
+        self::assertSame(2800, $classification->cooldownUntil());
+    }
+
+    public function testUsesCodexUsageLimitResetEpochAsCooldownHint(): void
+    {
+        $classification = (new ErrorClassifier())->classify(429, '{"error":{"type":"usage_limit_reached","resets_at":1600}}', [], 1000);
+
+        self::assertSame('quota', $classification->type());
+        self::assertSame(1600, $classification->cooldownUntil());
+    }
+
+    public function testUsesCodexUsageLimitResetSecondsAsCooldownHint(): void
+    {
+        $classification = (new ErrorClassifier())->classify(429, '{"error":{"type":"usage_limit_reached","resets_in_seconds":300}}', [], 1000);
+
+        self::assertSame('quota', $classification->type());
+        self::assertSame(1300, $classification->cooldownUntil());
     }
 
     public function testKeepsServerErrorsAsTransientErrors(): void

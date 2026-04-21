@@ -6,7 +6,7 @@ namespace CodexAuthProxy\Routing;
 
 final class ErrorClassifier
 {
-    public function __construct(private readonly int $defaultCooldownSeconds = 18000)
+    public function __construct(private readonly int $defaultCooldownSeconds = 18000, private readonly int $authCooldownSeconds = 1800)
     {
     }
 
@@ -17,11 +17,11 @@ final class ErrorClassifier
         $bodyLower = strtolower($body);
 
         if ($statusCode === 401 || $statusCode === 403) {
-            return new ErrorClassification('auth', true, $now);
+            return new ErrorClassification('auth', true, $now + $this->authCooldownSeconds);
         }
 
         if ($this->containsAuthSignal($bodyLower)) {
-            return new ErrorClassification('auth', true, $now);
+            return new ErrorClassification('auth', true, $now + $this->authCooldownSeconds);
         }
 
         if ($statusCode === 429 || $this->containsQuotaSignal($bodyLower)) {
@@ -48,7 +48,7 @@ final class ErrorClassifier
 
     private function containsQuotaSignal(string $bodyLower): bool
     {
-        foreach (['quota_exceeded', 'insufficient_quota', 'rate_limit_exceeded', 'over limit', 'too many requests'] as $needle) {
+        foreach (['usage_limit_reached', 'quota_exceeded', 'insufficient_quota', 'rate_limit_exceeded', 'over limit', 'too many requests'] as $needle) {
             if (str_contains($bodyLower, $needle)) {
                 return true;
             }
@@ -78,15 +78,14 @@ final class ErrorClassifier
 
         $decoded = json_decode($body, true);
         if (is_array($decoded)) {
-            $hint = $this->findCooldownHint($decoded);
-            if (is_int($hint)) {
-                return $now + $hint;
+            $absoluteHint = $this->findAbsoluteCooldownHint($decoded, $now);
+            if ($absoluteHint !== null) {
+                return $absoluteHint;
             }
-            if (is_string($hint)) {
-                $timestamp = strtotime($hint);
-                if ($timestamp !== false) {
-                    return $timestamp;
-                }
+
+            $relativeHint = $this->findRelativeCooldownHint($decoded);
+            if ($relativeHint !== null) {
+                return $now + $relativeHint;
             }
         }
 
@@ -94,9 +93,9 @@ final class ErrorClassifier
     }
 
     /** @param array<string,mixed> $data */
-    private function findCooldownHint(array $data): int|string|null
+    private function findRelativeCooldownHint(array $data): ?int
     {
-        foreach (['retry_after', 'retry_after_seconds', 'reset_after'] as $key) {
+        foreach (['retry_after', 'retry_after_seconds', 'reset_after', 'resets_in_seconds'] as $key) {
             $value = $data[$key] ?? null;
             if (is_int($value)) {
                 return $value;
@@ -106,16 +105,40 @@ final class ErrorClassifier
             }
         }
 
+        foreach ($data as $value) {
+            if (is_array($value)) {
+                $nested = $this->findRelativeCooldownHint($value);
+                if ($nested !== null) {
+                    return $nested;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /** @param array<string,mixed> $data */
+    private function findAbsoluteCooldownHint(array $data, int $now): ?int
+    {
         foreach (['available_at', 'reset_at', 'resets_at'] as $key) {
             $value = $data[$key] ?? null;
-            if (is_string($value) && trim($value) !== '') {
+            if (is_int($value) && $value > $now) {
                 return $value;
+            }
+            if (is_string($value) && ctype_digit($value) && (int) $value > $now) {
+                return (int) $value;
+            }
+            if (is_string($value) && trim($value) !== '') {
+                $timestamp = strtotime($value);
+                if ($timestamp !== false && $timestamp > $now) {
+                    return $timestamp;
+                }
             }
         }
 
         foreach ($data as $value) {
             if (is_array($value)) {
-                $nested = $this->findCooldownHint($value);
+                $nested = $this->findAbsoluteCooldownHint($value, $now);
                 if ($nested !== null) {
                     return $nested;
                 }
