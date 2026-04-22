@@ -94,6 +94,8 @@ Manage imported accounts and cached quota state:
 ```bash
 bin/codex-auth-proxy accounts
 bin/codex-auth-proxy accounts list
+bin/codex-auth-proxy accounts bindings
+bin/codex-auth-proxy accounts bindings session-key
 bin/codex-auth-proxy accounts refresh
 bin/codex-auth-proxy accounts refresh account-a
 bin/codex-auth-proxy accounts status
@@ -102,6 +104,8 @@ bin/codex-auth-proxy accounts delete account-a
 ```
 
 `accounts` shows the locally cached cooldown and quota availability for imported accounts.
+
+`accounts bindings` reads the local `state.json` and shows which session key is currently bound to which account, together with the account plan, cooldown state, availability, and the latest cached usage check time. It does not call any remote endpoint, so it is useful when debugging which account an active session is pinned to. Pass the optional second argument to filter by an exact session key. Add `--json` for machine-readable output.
 
 `accounts refresh` uses the existing usage reader to fetch the current Codex quota for one account or all accounts, then updates the local state cache.
 
@@ -132,7 +136,7 @@ Start the proxy:
 bin/codex-auth-proxy serve --port=1456
 ```
 
-The proxy supports Codex HTTP/SSE and WebSocket requests. Requests are mapped from Codex CLI's `/v1/*` base URL to ChatGPT's Codex backend (`https://chatgpt.com/backend-api/codex`). `serve` stays on the direct upstream proxy path; it only consults the cached quota availability and cooldown state to choose an account, and it does not depend on `app-server` being in the main request path. HTTP streams are framed as SSE before forwarding to Codex, and first-frame quota/auth errors are intercepted before bytes are sent so the proxy can switch to another available account. WebSocket requests use Codex websocket v2 headers and retry once on a replacement account when a quota/auth error arrives before any upstream data has been forwarded.
+The proxy supports Codex HTTP/SSE and WebSocket requests. Requests are mapped from Codex CLI's `/v1/*` base URL to ChatGPT's Codex backend (`https://chatgpt.com/backend-api/codex`). `serve` stays on the direct upstream proxy path; it only consults the cached quota availability and cooldown state to choose an account, and it does not depend on `app-server` being in the main request path. HTTP streams are framed as SSE before forwarding to Codex, and first-frame quota/auth errors are intercepted before bytes are sent so the proxy can switch to another available account. WebSocket requests use Codex websocket v2 headers and can fail over across multiple replacement accounts while no upstream data has been forwarded yet.
 
 ## Configuration
 
@@ -158,7 +162,7 @@ CODEX_AUTH_PROXY_HTTPS_PROXY=http://127.0.0.1:7890
 CODEX_AUTH_PROXY_NO_PROXY=localhost,127.0.0.1,::1
 ```
 
-The project intentionally reads only the namespaced proxy variables above. It does not treat shell-level `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, or lowercase variants as application configuration.
+The project intentionally reads only the namespaced proxy variables above. It does not treat shell-level `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, or lowercase variants as application configuration.
 
 Outbound proxy settings are applied to OAuth token exchange, token refresh, `serve` upstream HTTP/SSE and WebSocket connections, and `accounts status` / `accounts refresh` when they spawn `codex app-server`. Proxy URLs support `http://` and `socks5://`. For the `codex app-server` subprocess, shell-level proxy variables are cleared first, then the resolved project proxy settings are exported as standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
 

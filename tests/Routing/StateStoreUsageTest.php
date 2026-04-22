@@ -57,6 +57,23 @@ final class StateStoreUsageTest extends TestCase
         self::assertNull($reloaded->error);
     }
 
+    public function testPersistsCooldownReasonAndClearsItWhenCooldownIsReset(): void
+    {
+        $dir = $this->tempDir('cap-state');
+        $path = $dir . '/state.json';
+        $state = StateStore::file($path);
+
+        $state->setCooldown('acct-alpha', 1234567890, 'auth');
+        $reloaded = StateStore::file($path);
+        self::assertSame(1234567890, $reloaded->cooldownUntil('acct-alpha'));
+        self::assertSame('auth', $reloaded->cooldownReason('acct-alpha'));
+
+        $state->setCooldownUntil('acct-alpha', 0);
+        $cleared = StateStore::file($path);
+        self::assertSame(0, $cleared->cooldownUntil('acct-alpha'));
+        self::assertNull($cleared->cooldownReason('acct-alpha'));
+    }
+
     public function testWritesMergeExternalStateChangesFromOtherProcesses(): void
     {
         $dir = $this->tempDir('cap-state');
@@ -80,6 +97,20 @@ final class StateStoreUsageTest extends TestCase
         self::assertSame('acct-beta', $reloaded->sessionAccount('thread-2'));
         self::assertNotNull($reloaded->accountUsage('acct-alpha'));
         self::assertSame(7.0, $reloaded->accountUsage('acct-alpha')?->primary?->leftPercent);
+    }
+
+    public function testSameInstanceReloadsWhenExternalWriterReplacesStateFile(): void
+    {
+        $dir = $this->tempDir('cap-state');
+        $path = $dir . '/state.json';
+        $state = StateStore::file($path);
+
+        $state->bindSession('thread-1', 'acct-alpha');
+        self::assertSame('acct-alpha', $state->sessionAccount('thread-1'));
+
+        StateStore::file($path)->bindSession('thread-2', 'acct-beta');
+
+        self::assertSame('acct-beta', $state->sessionAccount('thread-2'));
     }
 
     public function testRestoresHistoricalWindowShapeWithoutLeftPercentOrWindowMinutes(): void

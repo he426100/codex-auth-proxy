@@ -22,4 +22,24 @@ final class StreamErrorDetectorTest extends TestCase
 
         self::assertNull($payload);
     }
+
+    public function testDetectsCompletedFramesAndPayloads(): void
+    {
+        self::assertTrue(StreamErrorDetector::isCompletedFrame("data: {\"type\":\"response.completed\"}\n\n"));
+        self::assertTrue(StreamErrorDetector::isCompletedPayload('{"type":"response.done"}'));
+        self::assertFalse(StreamErrorDetector::isCompletedFrame("data: {\"type\":\"response.output_text.delta\"}\n\n"));
+        self::assertFalse(StreamErrorDetector::isCompletedPayload('{"type":"response.output_text.delta"}'));
+    }
+
+    public function testNormalizesResponseDonePayload(): void
+    {
+        self::assertSame(
+            '{"type":"response.completed","response":{"id":"resp_1"}}',
+            StreamErrorDetector::normalizeCompletedPayload('{"type":"response.done","response":{"id":"resp_1"}}'),
+        );
+        self::assertSame(
+            '{"type":"response.completed","response":{"id":"resp_2"}}',
+            StreamErrorDetector::normalizeCompletedPayload('{"type":"response.completed","response":{"id":"resp_2"}}'),
+        );
+    }
 }

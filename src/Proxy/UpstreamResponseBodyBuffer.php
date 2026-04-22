@@ -8,6 +8,7 @@ final class UpstreamResponseBodyBuffer
 {
     private string $body = '';
     private bool $streamed = false;
+    private bool $completed = false;
     private bool $streamErrorBuffered = false;
     private string $undecided = '';
 
@@ -64,10 +65,16 @@ final class UpstreamResponseBodyBuffer
             }
 
             if ($statusCode <= 0) {
+                if (StreamErrorDetector::isCompletedFrame($frame)) {
+                    $this->completed = true;
+                }
                 $this->queuedFrames[] = $frame;
                 continue;
             }
 
+            if (StreamErrorDetector::isCompletedFrame($frame)) {
+                $this->completed = true;
+            }
             $frames[] = $frame;
         }
 
@@ -101,13 +108,21 @@ final class UpstreamResponseBodyBuffer
                 return [];
             }
 
-            $frames = $this->framer->write($this->undecided);
+            foreach ($this->framer->write($this->undecided) as $frame) {
+                if (StreamErrorDetector::isCompletedFrame($frame)) {
+                    $this->completed = true;
+                }
+                $frames[] = $frame;
+            }
             $this->undecided = '';
         }
 
         $frames = array_merge($this->queuedFrames, $frames);
         $this->queuedFrames = [];
         foreach ($this->framer->flush() as $frame) {
+            if (StreamErrorDetector::isCompletedFrame($frame)) {
+                $this->completed = true;
+            }
             $frames[] = $frame;
         }
         if ($frames !== []) {
@@ -125,6 +140,11 @@ final class UpstreamResponseBodyBuffer
     public function streamed(): bool
     {
         return $this->streamed;
+    }
+
+    public function completed(): bool
+    {
+        return $this->completed;
     }
 
     /** @param array<string,string> $headers */

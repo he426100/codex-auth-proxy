@@ -186,7 +186,8 @@ final class CodexProxyServer
         $sessionKey = $extractor->extract($request->header ?? [], $rawBody);
         $body = $payloadNormalizer->normalizeHttp($rawBody);
         try {
-            $account = $this->freshAccount($scheduler->accountForSession($sessionKey->primary, $sessionKey->fallback), $repository, $scheduler);
+            $account = $this->freshAccount($this->accountForSessionWithRecovery($sessionKey, $scheduler, $repository), $repository, $scheduler);
+            $authRefreshAttempts = [];
             while (true) {
                 $result = $this->forward($request, $response, $account, $body, $headers, false);
                 $classification = $classifier->classify($result['status'], $result['body'], $result['headers']);
@@ -199,6 +200,12 @@ final class CodexProxyServer
                     return;
                 }
 
+                $refreshed = $this->refreshAccountAfterAuthFailure($classification, $account, $repository, $scheduler, $authRefreshAttempts);
+                if ($refreshed !== null) {
+                    $account = $refreshed;
+                    continue;
+                }
+
                 $cooldownSeconds = max(1, $classification->cooldownUntil() - time());
                 $this->activeLogger->warning('Switching Codex account after hard failure', [
                     'request_id' => $requestId,
@@ -207,7 +214,11 @@ final class CodexProxyServer
                     'cooldown_seconds' => $cooldownSeconds,
                 ]);
                 $this->traceUpstreamError($requestId, 'http', 'hard_switch', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
-                $account = $this->freshAccount($scheduler->switchAfterHardFailure($sessionKey->primary, $cooldownSeconds), $repository, $scheduler);
+                $account = $this->freshAccount(
+                    $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository),
+                    $repository,
+                    $scheduler,
+                );
             }
         } catch (RuntimeException $exception) {
             $this->activeLogger->warning('Codex proxy request unavailable', [
@@ -249,6 +260,7 @@ final class CodexProxyServer
         $payload = $normalizer->normalize($rawPayload);
         $requestId = $this->requestIdFactory->fromHeaders($request->header ?? []);
         $sessionKey = $extractor->extract($request->header ?? [], $rawPayload);
+        $retryTracker->beginPayload($fd, $payload);
         $websocketLastPayloads[$fd] = [
             'payload' => $payload,
             'opcode' => (int) $frame->opcode,
@@ -256,9 +268,26 @@ final class CodexProxyServer
         ];
         if ($client === null) {
             $account = null;
+            $authRefreshAttempts = [];
             try {
-                $account = $this->freshAccount($scheduler->accountForSession($sessionKey->primary, $sessionKey->fallback), $repository, $scheduler);
-                $client = $this->openUpstreamWebSocket($request, $account, $headers);
+                while ($client === null) {
+                    $account ??= $this->freshAccount($this->accountForSessionWithRecovery($sessionKey, $scheduler, $repository), $repository, $scheduler);
+                    try {
+                        $client = $this->openUpstreamWebSocket($request, $account, $headers);
+                    } catch (Throwable $throwable) {
+                        $refreshed = $this->refreshAccountAfterWebSocketUpgradeFailure($throwable, $classifier, $account, $repository, $scheduler, $authRefreshAttempts);
+                        if ($refreshed !== null) {
+                            $account = $refreshed;
+                            continue;
+                        }
+
+                        throw $throwable;
+                    }
+                }
+                if (!$client instanceof Client) {
+                    throw new RuntimeException('Upstream WebSocket connection was not established');
+                }
+
                 $websocketClients[$fd] = $client;
                 $this->startUpstreamWebSocketReader($server, $fd, $client, $request, $account, $websocketClients, $websocketLastPayloads, $scheduler, $classifier, $repository, $headers, $retryTracker);
             } catch (Throwable $throwable) {
@@ -312,17 +341,31 @@ final class CodexProxyServer
         if ($client->statusCode === -1) {
             $buffer = $this->upstreamClientError('HTTP request', $client);
         }
-        if (!$bodyBuffer->streamed()) {
-            foreach ($bodyBuffer->flush($responseHeaders) as $frame) {
-                if (!$headersSent) {
-                    $this->copyResponseHeaders($response, $responseHeaders, $status);
-                    $headersSent = true;
-                }
-                $response->write($frame);
+        foreach ($bodyBuffer->flush($responseHeaders) as $frame) {
+            if (!$headersSent) {
+                $this->copyResponseHeaders($response, $responseHeaders, $status);
+                $headersSent = true;
             }
+            $response->write($frame);
         }
         if (!$bodyBuffer->streamed() && $buffer === '' && is_string($client->body ?? null)) {
             $buffer = $client->body;
+        }
+        $incompleteStream = $this->httpAcceptFor($requestUri) === 'text/event-stream'
+            && $status > 0
+            && $status < 400
+            && !$bodyBuffer->completed();
+        if ($bodyBuffer->streamed() && $incompleteStream) {
+            if (!$headersSent) {
+                $this->copyResponseHeaders($response, $responseHeaders, $status);
+                $headersSent = true;
+            }
+            $response->write($this->incompleteHttpStreamErrorFrame());
+        }
+        if (!$bodyBuffer->streamed() && $incompleteStream) {
+            $status = 502;
+            $responseHeaders = ['Content-Type' => 'application/json'];
+            $buffer = $this->incompleteStreamErrorPayload('upstream_stream_incomplete', 502);
         }
         if ($bodyBuffer->streamed()) {
             $response->end();
@@ -365,6 +408,28 @@ final class CodexProxyServer
                 'status' => 503,
             ],
         ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+    }
+
+    private function incompleteHttpStreamErrorFrame(): string
+    {
+        return "event: error\ndata: " . $this->incompleteStreamErrorPayload('upstream_stream_incomplete', 502) . "\n\n";
+    }
+
+    private function incompleteStreamErrorPayload(string $code, int $status): string
+    {
+        return json_encode([
+            'type' => 'error',
+            'error' => [
+                'code' => $code,
+                'message' => $this->incompleteStreamMessage(),
+                'status' => $status,
+            ],
+        ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+    }
+
+    private function incompleteStreamMessage(): string
+    {
+        return 'stream disconnected before response.completed';
     }
 
     private function openUpstreamWebSocket(Request $request, CodexAccount $account, UpstreamHeaderFactory $headers): Client
@@ -431,6 +496,7 @@ final class CodexProxyServer
     {
         Coroutine::create(function () use ($server, $fd, $client, $request, $account, &$websocketClients, &$websocketLastPayloads, $scheduler, $classifier, $repository, $headers, $retryTracker): void {
             $forwardedData = false;
+            $completedSeen = false;
             $replacedClient = false;
             while (true) {
                 $frame = $client->recv();
@@ -440,6 +506,11 @@ final class CodexProxyServer
 
                 $data = is_object($frame) && property_exists($frame, 'data') ? (string) $frame->data : (string) $frame;
                 $opcode = is_object($frame) && property_exists($frame, 'opcode') ? (int) $frame->opcode : \WEBSOCKET_OPCODE_TEXT;
+                if ($opcode === \WEBSOCKET_OPCODE_CLOSE) {
+                    break;
+                }
+                $data = StreamErrorDetector::normalizeCompletedPayload($data);
+                $completedSeen = StreamErrorDetector::isCompletedPayload($data);
                 $errorBody = StreamErrorDetector::jsonErrorBody($data);
                 if ($errorBody !== null) {
                     $lastPayload = $websocketLastPayloads[$fd] ?? null;
@@ -449,11 +520,15 @@ final class CodexProxyServer
                     if ($classification->hardSwitch()) {
                         $cooldownSeconds = max(1, $classification->cooldownUntil() - time());
                         $retryAttempted = false;
-                        if ($lastPayload !== null && $retryTracker->claimRetry($fd, $lastPayload['payload'], $forwardedData)) {
+                        if ($lastPayload !== null && $retryTracker->claimRetry($fd, $lastPayload['payload'], $account->accountId(), $forwardedData)) {
                             $retryAttempted = true;
                             $replacement = null;
                             try {
-                                $replacement = $this->freshAccount($scheduler->switchAfterHardFailure($lastPayload['sessionKey']->primary, $cooldownSeconds), $repository, $scheduler);
+                                $replacement = $this->freshAccount(
+                                    $this->switchAfterHardFailureWithRecovery($lastPayload['sessionKey'], $cooldownSeconds, $classification->type(), $scheduler, $repository),
+                                    $repository,
+                                    $scheduler,
+                                );
                                 $replacementClient = $this->openUpstreamWebSocket($request, $replacement, $headers);
                                 $websocketClients[$fd] = $replacementClient;
                                 $this->startUpstreamWebSocketReader($server, $fd, $replacementClient, $request, $replacement, $websocketClients, $websocketLastPayloads, $scheduler, $classifier, $repository, $headers, $retryTracker);
@@ -471,7 +546,7 @@ final class CodexProxyServer
 
                         if (!$retryAttempted) {
                             try {
-                                $scheduler->switchAfterHardFailure($sessionKey->primary, $cooldownSeconds);
+                                $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository);
                             } catch (Throwable $throwable) {
                                 $this->activeLogger->warning('Failed to switch Codex account after WebSocket stream error', ['error' => $throwable->getMessage()]);
                             }
@@ -483,10 +558,18 @@ final class CodexProxyServer
                     $server->push($fd, $data, $opcode);
                     $forwardedData = true;
                 }
+
+                if ($completedSeen) {
+                    break;
+                }
             }
 
             $client->close();
             if (!$replacedClient && $server->isEstablished($fd)) {
+                if (!$completedSeen) {
+                    $this->pushWebSocketError($server, $fd, 502, $this->incompleteStreamMessage());
+                    return;
+                }
                 $server->disconnect($fd, \SWOOLE_WEBSOCKET_CLOSE_NORMAL, 'upstream closed');
             }
         });
@@ -522,10 +605,8 @@ final class CodexProxyServer
             if ($refreshed === null) {
                 return $account;
             }
-            $repository->saveAccount($refreshed);
-            $scheduler->replaceAccount($refreshed);
-            $this->activeLogger->info('Refreshed Codex account token', ['account' => $refreshed->name()]);
-            return $refreshed;
+
+            return $this->persistRefreshedAccount($refreshed, $repository, $scheduler, 'Refreshed Codex account token');
         } catch (Throwable $throwable) {
             $this->activeLogger->warning('Failed to refresh Codex account token', [
                 'account' => $account->name(),
@@ -533,6 +614,161 @@ final class CodexProxyServer
             ]);
             return $account;
         }
+    }
+
+    /**
+     * @param array<string,bool> $attemptedAccounts
+     */
+    private function refreshAccountAfterAuthFailure(
+        ErrorClassification $classification,
+        CodexAccount $account,
+        AccountRepository $repository,
+        Scheduler $scheduler,
+        array &$attemptedAccounts,
+    ): ?CodexAccount {
+        if ($classification->type() !== 'auth') {
+            return null;
+        }
+
+        return $this->refreshAccountOnce($account, $repository, $scheduler, $attemptedAccounts, 'Refreshed Codex account token after auth failure', 'Failed to refresh Codex account after auth failure');
+    }
+
+    /**
+     * @param array<string,bool> $attemptedAccounts
+     */
+    private function refreshAccountAfterWebSocketUpgradeFailure(
+        Throwable $throwable,
+        ErrorClassifier $classifier,
+        CodexAccount $account,
+        AccountRepository $repository,
+        Scheduler $scheduler,
+        array &$attemptedAccounts,
+    ): ?CodexAccount {
+        $classification = $this->classifyWebSocketUpgradeFailure($throwable, $classifier);
+        if (!$classification instanceof ErrorClassification) {
+            return null;
+        }
+
+        return $this->refreshAccountAfterAuthFailure($classification, $account, $repository, $scheduler, $attemptedAccounts);
+    }
+
+    private function classifyWebSocketUpgradeFailure(Throwable $throwable, ErrorClassifier $classifier): ?ErrorClassification
+    {
+        $message = $throwable->getMessage();
+        if (!preg_match('/status\s+(-?\d+):\s*(.*)\z/s', $message, $matches)) {
+            return null;
+        }
+
+        return $classifier->classify((int) $matches[1], $matches[2], []);
+    }
+
+    /**
+     * @param array<string,bool> $attemptedAccounts
+     */
+    private function refreshAccountOnce(
+        CodexAccount $account,
+        AccountRepository $repository,
+        Scheduler $scheduler,
+        array &$attemptedAccounts,
+        string $successMessage,
+        string $failureMessage,
+    ): ?CodexAccount {
+        if (($attemptedAccounts[$account->accountId()] ?? false) === true) {
+            return null;
+        }
+        $attemptedAccounts[$account->accountId()] = true;
+
+        try {
+            $refreshed = $this->activeTokenRefresher->refresh($account);
+
+            return $this->persistRefreshedAccount($refreshed, $repository, $scheduler, $successMessage);
+        } catch (Throwable $throwable) {
+            $this->activeLogger->warning($failureMessage, [
+                'account' => $account->name(),
+                'error' => $throwable->getMessage(),
+            ]);
+
+            return null;
+        }
+    }
+
+    private function persistRefreshedAccount(
+        CodexAccount $account,
+        AccountRepository $repository,
+        Scheduler $scheduler,
+        string $message,
+    ): CodexAccount {
+        $repository->saveAccount($account);
+        $scheduler->replaceAccount($account);
+        $this->activeLogger->info($message, ['account' => $account->name()]);
+
+        return $account;
+    }
+
+    private function accountForSessionWithRecovery(SessionKey $sessionKey, Scheduler $scheduler, AccountRepository $repository): CodexAccount
+    {
+        try {
+            return $scheduler->accountForSession($sessionKey->primary, $sessionKey->fallback);
+        } catch (RuntimeException $exception) {
+            if (!$this->isNoAvailableAccount($exception) || !$this->recoverAuthCooldownAccounts($repository, $scheduler)) {
+                throw $exception;
+            }
+
+            return $scheduler->accountForSession($sessionKey->primary, $sessionKey->fallback);
+        }
+    }
+
+    private function switchAfterHardFailureWithRecovery(
+        SessionKey $sessionKey,
+        int $cooldownSeconds,
+        string $cooldownReason,
+        Scheduler $scheduler,
+        AccountRepository $repository,
+    ): CodexAccount {
+        try {
+            return $scheduler->switchAfterHardFailure($sessionKey->primary, $cooldownSeconds, $cooldownReason);
+        } catch (RuntimeException $exception) {
+            if (!$this->isNoAvailableAccount($exception) || !$this->recoverAuthCooldownAccounts($repository, $scheduler)) {
+                throw $exception;
+            }
+
+            return $scheduler->switchAfterHardFailure($sessionKey->primary, $cooldownSeconds, $cooldownReason);
+        }
+    }
+
+    private function recoverAuthCooldownAccounts(AccountRepository $repository, Scheduler $scheduler): bool
+    {
+        $state = StateStore::file($this->stateFile);
+        $now = time();
+        $recovered = false;
+
+        foreach ($repository->load() as $account) {
+            if ($state->cooldownUntil($account->accountId()) <= $now) {
+                continue;
+            }
+            if ($state->cooldownReason($account->accountId()) !== 'auth') {
+                continue;
+            }
+
+            try {
+                $refreshed = $this->activeTokenRefresher->refresh($account);
+                $this->persistRefreshedAccount($refreshed, $repository, $scheduler, 'Recovered Codex account from auth cooldown');
+                $state->setCooldownUntil($account->accountId(), 0);
+                $recovered = true;
+            } catch (Throwable $throwable) {
+                $this->activeLogger->warning('Failed to recover Codex account from auth cooldown', [
+                    'account' => $account->name(),
+                    'error' => $throwable->getMessage(),
+                ]);
+            }
+        }
+
+        return $recovered;
+    }
+
+    private function isNoAvailableAccount(RuntimeException $exception): bool
+    {
+        return $exception->getMessage() === 'No available Codex account';
     }
 
     private function pushWebSocketError(Server $server, int $fd, int $status, string $message): void
@@ -546,7 +782,11 @@ final class CodexProxyServer
                     'status' => $status,
                 ],
             ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
-            $server->disconnect($fd, 1011, 'upstream error');
+            \Swoole\Timer::after(200, static function () use ($server, $fd): void {
+                if ($server->exist($fd)) {
+                    $server->disconnect($fd, 1011, 'upstream error');
+                }
+            });
         }
     }
 

@@ -66,8 +66,11 @@ final class UpstreamHeaderFactory
      */
     private function setCodexHeaders(array &$headers, array $downstreamHeaders, CodexAccount $account, bool $websocket, ?string $httpAccept): void
     {
-        $betaFeatures = $this->headerValue($downstreamHeaders, 'x-codex-beta-features') ?? $this->betaFeatures;
-        if ($betaFeatures !== '') {
+        $betaFeatures = $this->headerValue($downstreamHeaders, 'x-codex-beta-features');
+        if ($betaFeatures === null && $websocket) {
+            $betaFeatures = $this->betaFeatures;
+        }
+        if ($betaFeatures !== null && $betaFeatures !== '') {
             $headers['X-Codex-Beta-Features'] = $betaFeatures;
         }
 

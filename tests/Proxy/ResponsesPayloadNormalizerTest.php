@@ -80,9 +80,14 @@ final class ResponsesPayloadNormalizerTest extends TestCase
         self::assertSame('web_search', $decoded->tools[0]->type);
         self::assertSame('web_search', $decoded->tool_choice->type);
         self::assertSame('web_search', $decoded->tool_choice->tools[0]->type);
-        foreach (['context_management', 'max_output_tokens', 'max_completion_tokens', 'temperature', 'top_p', 'truncation', 'user', 'service_tier'] as $field) {
-            self::assertObjectNotHasProperty($field, $decoded);
-        }
+        self::assertEquals((object) ['compaction' => (object) ['type' => 'auto']], $decoded->context_management);
+        self::assertSame(1024, $decoded->max_output_tokens);
+        self::assertSame(1024, $decoded->max_completion_tokens);
+        self::assertSame(0.2, $decoded->temperature);
+        self::assertSame(0.9, $decoded->top_p);
+        self::assertSame('auto', $decoded->truncation);
+        self::assertSame('user-1', $decoded->user);
+        self::assertSame('default', $decoded->service_tier);
     }
 
     public function testHttpWrapsStringInputAndPreservesNativeSessionFields(): void

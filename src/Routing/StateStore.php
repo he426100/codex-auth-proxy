@@ -9,6 +9,8 @@ use CodexAuthProxy\Usage\CachedAccountUsage;
 
 final class StateStore
 {
+    private ?string $stateRevision = null;
+
     /** @param array<string,mixed> $state */
     private function __construct(private array $state, private readonly ?string $path = null)
     {
@@ -34,7 +36,10 @@ final class StateStore
 
     public static function file(string $path): self
     {
-        return new self(self::readState($path), $path);
+        $store = new self(self::readState($path), $path);
+        $store->stateRevision = self::stateRevision($path);
+
+        return $store;
     }
 
     public function sessionAccount(string $sessionKey): ?string
@@ -52,6 +57,25 @@ final class StateStore
         });
     }
 
+    /** @return array<string,string> */
+    public function allSessionAccounts(): array
+    {
+        $this->reload();
+        if (!isset($this->state['sessions']) || !is_array($this->state['sessions'])) {
+            return [];
+        }
+
+        $sessions = [];
+        foreach ($this->state['sessions'] as $sessionKey => $accountId) {
+            if (!is_string($sessionKey) || $sessionKey === '' || !is_string($accountId) || $accountId === '') {
+                continue;
+            }
+            $sessions[$sessionKey] = $accountId;
+        }
+
+        return $sessions;
+    }
+
     public function cooldownUntil(string $accountId): int
     {
         $this->reload();
@@ -60,10 +84,33 @@ final class StateStore
         return is_int($value) ? $value : 0;
     }
 
+    public function cooldownReason(string $accountId): ?string
+    {
+        $this->reload();
+        $value = $this->state['accounts'][$accountId]['cooldown_reason'] ?? null;
+
+        return is_string($value) && $value !== '' ? $value : null;
+    }
+
     public function setCooldownUntil(string $accountId, int $timestamp): void
     {
         $this->update(function (array &$state) use ($accountId, $timestamp): void {
-            $state['accounts'][$accountId]['cooldown_until'] = $timestamp;
+            $state['accounts'][$accountId]['cooldown_until'] = max(0, $timestamp);
+            if ($timestamp <= 0) {
+                unset($state['accounts'][$accountId]['cooldown_reason']);
+            }
+        });
+    }
+
+    public function setCooldown(string $accountId, int $timestamp, ?string $reason): void
+    {
+        $this->update(function (array &$state) use ($accountId, $timestamp, $reason): void {
+            $state['accounts'][$accountId]['cooldown_until'] = max(0, $timestamp);
+            if ($timestamp <= 0 || $reason === null || $reason === '') {
+                unset($state['accounts'][$accountId]['cooldown_reason']);
+                return;
+            }
+            $state['accounts'][$accountId]['cooldown_reason'] = $reason;
         });
     }
 
@@ -176,7 +223,13 @@ final class StateStore
             return;
         }
 
+        $revision = self::stateRevision($this->path);
+        if ($revision === $this->stateRevision) {
+            return;
+        }
+
         $this->state = self::readState($this->path);
+        $this->stateRevision = $revision;
     }
 
     /**
@@ -204,6 +257,7 @@ final class StateStore
             $locked = true;
             chmod($lockPath, 0600);
             $this->state = self::readState($this->path);
+            $this->stateRevision = self::stateRevision($this->path);
             $mutator($this->state);
             $this->writeState();
         } finally {
@@ -243,5 +297,21 @@ final class StateStore
             throw new RuntimeException('Failed to replace state file: ' . $this->path);
         }
         chmod($this->path, 0600);
+        $this->stateRevision = self::stateRevision($this->path);
+    }
+
+    private static function stateRevision(string $path): string
+    {
+        clearstatcache(true, $path);
+        $stat = @stat($path);
+        if (!is_array($stat)) {
+            return 'missing';
+        }
+
+        return implode(':', [
+            (string) $stat['ino'],
+            (string) $stat['size'],
+            (string) $stat['mtime'],
+        ]);
     }
 }

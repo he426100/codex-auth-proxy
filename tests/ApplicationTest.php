@@ -363,6 +363,135 @@ final class ApplicationTest extends TestCase
         self::assertNotSame('7%', $payload[0]['primary_left_percent']);
     }
 
+    public function testAccountsBindingsShowsSessionMappingsAndCooldownReason(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $alphaSource = $home . '/alpha.json';
+        $betaSource = $home . '/beta.json';
+        $cooldownUntil = time() + 1800;
+        $this->writeJson($alphaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+        $this->writeJson($betaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('beta')['tokens'],
+        ]);
+
+        mkdir($home . '/.config/codex-auth-proxy', 0700, true);
+        $this->writeJson($home . '/.config/codex-auth-proxy/state.json', [
+            'accounts' => [
+                'acct-alpha' => [
+                    'cooldown_until' => $cooldownUntil,
+                    'cooldown_reason' => 'auth',
+                ],
+            ],
+            'sessions' => [
+                'thread-1' => 'acct-alpha',
+                'thread-2' => 'acct-beta',
+            ],
+            'cursor' => 0,
+            'usage' => [
+                'acct-alpha' => [
+                    'plan_type' => 'plus',
+                    'checked_at' => time(),
+                    'error' => null,
+                    'primary' => [
+                        'used_percent' => 93.0,
+                        'left_percent' => 7.0,
+                        'window_minutes' => 300,
+                        'resets_at' => $cooldownUntil,
+                    ],
+                    'secondary' => [
+                        'used_percent' => 15.0,
+                        'left_percent' => 85.0,
+                        'window_minutes' => 10080,
+                        'resets_at' => time() + 86_400,
+                    ],
+                ],
+            ],
+        ]);
+
+        $application = new Application($home);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $alphaSource]);
+        (new CommandTester($application->find('import')))->execute(['name' => 'beta', '--from' => $betaSource]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute(['action' => 'bindings']);
+
+        self::assertSame(0, $code);
+        self::assertStringContainsString('thread-1', $tester->getDisplay());
+        self::assertStringContainsString('thread-2', $tester->getDisplay());
+        self::assertStringContainsString('alpha', $tester->getDisplay());
+        self::assertStringContainsString('beta', $tester->getDisplay());
+        self::assertStringContainsString('alpha@example.com', $tester->getDisplay());
+        self::assertStringContainsString('cooldown (auth)', $tester->getDisplay());
+    }
+
+    public function testAccountsBindingsJsonUsesStructuredFieldsAndSessionFilter(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $source = $home . '/alpha.json';
+        $cooldownUntil = time() + 1800;
+        $this->writeJson($source, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+
+        mkdir($home . '/.config/codex-auth-proxy', 0700, true);
+        $this->writeJson($home . '/.config/codex-auth-proxy/state.json', [
+            'accounts' => [
+                'acct-alpha' => [
+                    'cooldown_until' => $cooldownUntil,
+                    'cooldown_reason' => 'auth',
+                ],
+            ],
+            'sessions' => [
+                'thread-1' => 'acct-alpha',
+            ],
+            'cursor' => 0,
+            'usage' => [
+                'acct-alpha' => [
+                    'plan_type' => 'plus',
+                    'checked_at' => time(),
+                    'error' => null,
+                    'primary' => [
+                        'used_percent' => 93.0,
+                        'left_percent' => 7.0,
+                        'window_minutes' => 300,
+                        'resets_at' => $cooldownUntil,
+                    ],
+                    'secondary' => [
+                        'used_percent' => 15.0,
+                        'left_percent' => 85.0,
+                        'window_minutes' => 10080,
+                        'resets_at' => time() + 86_400,
+                    ],
+                ],
+            ],
+        ]);
+
+        $application = new Application($home);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $source]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute(['action' => 'bindings', 'name' => 'thread-1', '--json' => true]);
+
+        $payload = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame(0, $code);
+        self::assertIsArray($payload);
+        self::assertCount(1, $payload);
+        self::assertSame('thread-1', $payload[0]['session_key']);
+        self::assertSame('acct-alpha', $payload[0]['account_id']);
+        self::assertSame('alpha', $payload[0]['account_name']);
+        self::assertSame('alpha@example.com', $payload[0]['email']);
+        self::assertSame('plus', $payload[0]['plan_type']);
+        self::assertSame($cooldownUntil, $payload[0]['cooldown_until']);
+        self::assertSame('auth', $payload[0]['cooldown_reason']);
+        self::assertSame('cooldown', $payload[0]['availability_reason']);
+        self::assertFalse($payload[0]['routable']);
+    }
+
     public function testAccountsStatusShowsAccountPlanAndQuota(): void
     {
         $home = $this->tempDir('cap-home');
@@ -434,6 +563,41 @@ final class ApplicationTest extends TestCase
         self::assertStringContainsString('success', $tester->getDisplay());
         self::assertStringContainsString('beta', $tester->getDisplay());
         self::assertStringContainsString('failure', $tester->getDisplay());
+    }
+
+    public function testAccountsRefreshClearsCooldownAfterSuccessfulLiveUsageUpdate(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $source = $home . '/alpha.json';
+        $this->writeJson($source, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+
+        mkdir($home . '/.config/codex-auth-proxy', 0700, true);
+        $this->writeJson($home . '/.config/codex-auth-proxy/state.json', [
+            'accounts' => [
+                'acct-alpha' => [
+                    'cooldown_until' => time() + 1800,
+                ],
+            ],
+        ]);
+
+        $usageClient = new FakeUsageClient(new AccountUsage(
+            'plus',
+            new RateLimitWindow(20.0, 300, time() + 1800),
+            new RateLimitWindow(3.0, 10080, time() + 86_400),
+        ));
+        $application = new Application($home, usageClient: $usageClient);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $source]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute(['action' => 'refresh']);
+
+        $state = json_decode((string) file_get_contents($home . '/.config/codex-auth-proxy/state.json'), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame(0, $code);
+        self::assertSame(0, $state['accounts']['acct-alpha']['cooldown_until']);
+        self::assertNull($state['usage']['acct-alpha']['error']);
     }
 
     public function testAccountsStatusWritesErrorMetadataOnFailure(): void

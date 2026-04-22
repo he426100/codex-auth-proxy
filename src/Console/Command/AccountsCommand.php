@@ -43,8 +43,8 @@ final class AccountsCommand extends ProxyCommand
     protected function configure(): void
     {
         $this
-            ->addArgument('action', InputArgument::OPTIONAL, 'Action: list, refresh, status, or delete', 'list')
-            ->addArgument('name', InputArgument::OPTIONAL, 'Account name for refresh, status, or delete')
+            ->addArgument('action', InputArgument::OPTIONAL, 'Action: list, bindings, refresh, status, or delete', 'list')
+            ->addArgument('name', InputArgument::OPTIONAL, 'Account name for refresh/status/delete, or session key for bindings')
             ->addOption('json', null, InputOption::VALUE_NONE, 'Output machine-readable JSON')
             ->addOption('yes', 'y', InputOption::VALUE_NONE, 'Skip delete confirmation prompt');
         $this->addPathOptions();
@@ -58,10 +58,11 @@ final class AccountsCommand extends ProxyCommand
 
         return match ($action) {
             'list' => $this->listAccounts($repository, $config, $input, $output),
+            'bindings' => $this->bindings($repository, $config, $input, $output),
             'refresh' => $this->refresh($repository, $config, $input, $output),
             'status' => $this->status($repository, $config, $input, $output),
             'delete' => $this->delete($repository, $input, $output),
-            default => throw new InvalidArgumentException('Action must be list, refresh, status, or delete'),
+            default => throw new InvalidArgumentException('Action must be list, bindings, refresh, status, or delete'),
         };
     }
 
@@ -131,6 +132,42 @@ final class AccountsCommand extends ProxyCommand
         return $failed ? self::FAILURE : self::SUCCESS;
     }
 
+    private function bindings(AccountRepository $repository, AppConfig $config, InputInterface $input, OutputInterface $output): int
+    {
+        $state = StateStore::file($config->stateFile);
+        $rows = $this->bindingRows($repository, $state, $this->stringArgument($input, 'name'));
+
+        if ((bool) $input->getOption('json')) {
+            $output->writeln(json_encode(array_map(fn (array $row): array => $this->bindingJson($row), $rows), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+
+            return self::SUCCESS;
+        }
+
+        if ($rows === []) {
+            $output->writeln('No session bindings found.');
+
+            return self::SUCCESS;
+        }
+
+        $table = new Table($output);
+        $table->setHeaders(['Session', 'Account', 'Email', 'Plan', 'Available', 'Reason', 'Cooldown', 'Checked at']);
+        foreach ($rows as $row) {
+            $table->addRow([
+                $row['session_key'],
+                $row['account_name'],
+                $row['email'],
+                $row['plan'],
+                $row['available'],
+                $row['reason'],
+                $row['cooldown'],
+                $row['checked_at'],
+            ]);
+        }
+        $table->render();
+
+        return self::SUCCESS;
+    }
+
     private function status(AccountRepository $repository, AppConfig $config, InputInterface $input, OutputInterface $output): int
     {
         $results = $this->fetchLiveUsageResults($repository, $config, $this->stringArgument($input, 'name'));
@@ -178,14 +215,14 @@ final class AccountsCommand extends ProxyCommand
             try {
                 $account = $this->refreshAccountIfNeeded($repository, $account, $config);
                 $usage = $client->fetch($account);
-                $state->setAccountUsage($account->accountId(), CachedAccountUsage::fromLive($usage, $checkedAt));
+                $this->recordLiveUsageSuccess($state, $account, $usage, $checkedAt);
                 $results[] = ['account' => $account, 'usage' => $usage, 'error' => null];
             } catch (InvalidArgumentException|RuntimeException $exception) {
                 if ($exception instanceof RuntimeException && $this->isInvalidatedTokenFailure($exception)) {
                     try {
                         $account = $this->refreshAccount($repository, $account, $config);
                         $usage = $client->fetch($account);
-                        $state->setAccountUsage($account->accountId(), CachedAccountUsage::fromLive($usage, $checkedAt));
+                        $this->recordLiveUsageSuccess($state, $account, $usage, $checkedAt);
                         $results[] = ['account' => $account, 'usage' => $usage, 'error' => null];
 
                         continue;
@@ -200,6 +237,12 @@ final class AccountsCommand extends ProxyCommand
         }
 
         return $results;
+    }
+
+    private function recordLiveUsageSuccess(StateStore $state, CodexAccount $account, AccountUsage $usage, int $checkedAt): void
+    {
+        $state->setAccountUsage($account->accountId(), CachedAccountUsage::fromLive($usage, $checkedAt));
+        $state->setCooldownUntil($account->accountId(), 0);
     }
 
     private function delete(AccountRepository $repository, InputInterface $input, OutputInterface $output): int
@@ -351,6 +394,7 @@ final class AccountsCommand extends ProxyCommand
         $usage = $snapshot['usage'];
         $cooldownUntil = $snapshot['cooldown_until'];
         $now = $snapshot['now'];
+        $cooldownReason = $snapshot['cooldown_reason'];
 
         return [
             'name' => $account->name(),
@@ -361,7 +405,7 @@ final class AccountsCommand extends ProxyCommand
             'five_hour_left' => $this->formatCachedWindowPercent($usage?->primary),
             'weekly_left' => $this->formatCachedWindowPercent($usage?->secondary),
             'available' => $this->formatAvailability($availability),
-            'reason' => $this->formatAvailabilityReason($availability->reason, $usage?->error),
+            'reason' => $this->formatAvailabilityReason($availability->reason, $usage?->error, $cooldownReason),
             'checked_at' => $this->formatTimestamp($usage?->checkedAt),
         ];
     }
@@ -373,6 +417,7 @@ final class AccountsCommand extends ProxyCommand
         $availability = $snapshot['availability'];
         $usage = $snapshot['usage'];
         $cooldownUntil = $snapshot['cooldown_until'];
+        $cooldownReason = $snapshot['cooldown_reason'];
 
         return [
             'name' => $account->name(),
@@ -381,6 +426,7 @@ final class AccountsCommand extends ProxyCommand
             'enabled' => $account->enabled(),
             'account_id' => $account->accountId(),
             'cooldown_until' => $cooldownUntil > 0 ? $cooldownUntil : null,
+            'cooldown_reason' => $cooldownReason,
             'primary_left_percent' => $usage?->primary?->leftPercent,
             'secondary_left_percent' => $usage?->secondary?->leftPercent,
             'is_confirmed_available' => $availability->isConfirmedAvailable,
@@ -392,12 +438,13 @@ final class AccountsCommand extends ProxyCommand
         ];
     }
 
-    /** @return array{usage:?CachedAccountUsage,availability:AccountAvailability,cooldown_until:int,plan_type:string,now:int} */
+    /** @return array{usage:?CachedAccountUsage,availability:AccountAvailability,cooldown_until:int,cooldown_reason:?string,plan_type:string,now:int} */
     private function accountDashboardSnapshot(CodexAccount $account, StateStore $state): array
     {
         $now = time();
         $usage = $state->accountUsage($account->accountId());
         $cooldownUntil = $state->cooldownUntil($account->accountId());
+        $cooldownReason = $state->cooldownReason($account->accountId());
         $availability = AccountAvailability::from($account, $cooldownUntil, $usage, $now);
         $planType = $account->planType();
         if ($usage instanceof CachedAccountUsage && $usage->planType !== '') {
@@ -408,8 +455,102 @@ final class AccountsCommand extends ProxyCommand
             'usage' => $usage,
             'availability' => $availability,
             'cooldown_until' => $cooldownUntil,
+            'cooldown_reason' => $cooldownReason,
             'plan_type' => $planType,
             'now' => $now,
+        ];
+    }
+
+    /**
+     * @return list<array{
+     *   session_key:string,
+     *   account_id:string,
+     *   account_name:string,
+     *   email:string,
+     *   plan:string,
+     *   available:string,
+     *   reason:string,
+     *   cooldown:string,
+     *   checked_at:string,
+     *   cooldown_until:?int,
+     *   cooldown_reason:?string,
+     *   availability_reason:string,
+     *   routable:bool
+     * }>
+     */
+    private function bindingRows(AccountRepository $repository, StateStore $state, ?string $sessionFilter): array
+    {
+        $accountsById = [];
+        foreach ($repository->load() as $account) {
+            $accountsById[$account->accountId()] = $account;
+        }
+
+        $rows = [];
+        foreach ($state->allSessionAccounts() as $sessionKey => $accountId) {
+            if ($sessionFilter !== null && $sessionKey !== $sessionFilter) {
+                continue;
+            }
+
+            $account = $accountsById[$accountId] ?? null;
+            if (!$account instanceof CodexAccount) {
+                $rows[] = [
+                    'session_key' => $sessionKey,
+                    'account_id' => $accountId,
+                    'account_name' => '-',
+                    'email' => '-',
+                    'plan' => 'Unknown',
+                    'available' => 'unknown',
+                    'reason' => 'account_missing',
+                    'cooldown' => '-',
+                    'checked_at' => '-',
+                    'cooldown_until' => null,
+                    'cooldown_reason' => null,
+                    'availability_reason' => 'account_missing',
+                    'routable' => false,
+                ];
+                continue;
+            }
+
+            $snapshot = $this->accountDashboardSnapshot($account, $state);
+            $availability = $snapshot['availability'];
+            $usage = $snapshot['usage'];
+            $rows[] = [
+                'session_key' => $sessionKey,
+                'account_id' => $accountId,
+                'account_name' => $account->name(),
+                'email' => $account->email() !== '' ? $account->email() : '-',
+                'plan' => $this->displayPlan($snapshot['plan_type']),
+                'available' => $this->formatAvailability($availability),
+                'reason' => $this->formatAvailabilityReason($availability->reason, $usage?->error, $snapshot['cooldown_reason']),
+                'cooldown' => $this->formatCooldown($snapshot['cooldown_until'], $snapshot['now']),
+                'checked_at' => $this->formatTimestamp($usage?->checkedAt),
+                'cooldown_until' => $snapshot['cooldown_until'] > 0 ? $snapshot['cooldown_until'] : null,
+                'cooldown_reason' => $snapshot['cooldown_reason'],
+                'availability_reason' => $availability->reason,
+                'routable' => $availability->routable,
+            ];
+        }
+
+        ksort($rows);
+
+        return array_values($rows);
+    }
+
+    /** @param array<string,mixed> $row */
+    private function bindingJson(array $row): array
+    {
+        return [
+            'session_key' => $row['session_key'],
+            'account_id' => $row['account_id'],
+            'account_name' => $row['account_name'],
+            'email' => $row['email'] !== '-' ? $row['email'] : '',
+            'plan_type' => strtolower((string) $row['plan']),
+            'routable' => $row['routable'],
+            'available' => $row['available'],
+            'availability_reason' => $row['availability_reason'],
+            'cooldown_until' => $row['cooldown_until'],
+            'cooldown_reason' => $row['cooldown_reason'],
+            'checked_at' => $this->parseTimestamp($row['checked_at']),
         ];
     }
 
@@ -493,12 +634,26 @@ final class AccountsCommand extends ProxyCommand
         return $this->formatPercent($window->leftPercent) . '%';
     }
 
-    private function formatAvailabilityReason(string $reason, ?string $error): string
+    private function formatAvailabilityReason(string $reason, ?string $error, ?string $cooldownReason = null): string
     {
+        if ($reason === 'cooldown' && $cooldownReason !== null && $cooldownReason !== '') {
+            $reason .= ' (' . $cooldownReason . ')';
+        }
         if ($error === null || $error === '') {
             return $reason;
         }
 
         return $reason . ' (' . $error . ')';
+    }
+
+    private function parseTimestamp(string $value): ?int
+    {
+        if ($value === '-' || $value === '') {
+            return null;
+        }
+
+        $timestamp = strtotime($value);
+
+        return $timestamp === false ? null : $timestamp;
     }
 }

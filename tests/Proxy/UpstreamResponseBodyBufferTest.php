@@ -47,4 +47,39 @@ final class UpstreamResponseBodyBufferTest extends TestCase
         self::assertFalse($buffer->streamed());
         self::assertSame('{"error":{"code":"rate_limit_exceeded"}}', $buffer->body());
     }
+
+    public function testStreamsFragmentedSseFramesInOrderUntilCompleted(): void
+    {
+        $buffer = new UpstreamResponseBodyBuffer(forceBuffer: false);
+
+        self::assertSame([], $buffer->write(
+            200,
+            ['content-type' => 'text/event-stream'],
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel",
+        ));
+        self::assertSame([
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
+        ], $buffer->write(
+            200,
+            ['content-type' => 'text/event-stream'],
+            "lo\"}\n\n",
+        ));
+        self::assertSame([
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\" world\"}\n\n",
+        ], $buffer->write(
+            200,
+            ['content-type' => 'text/event-stream'],
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\" world\"}\n\n",
+        ));
+        self::assertSame([
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_stream_1\"}}\n\n",
+        ], $buffer->write(
+            200,
+            ['content-type' => 'text/event-stream'],
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_stream_1\"}}",
+        ));
+        self::assertSame([], $buffer->flush(['content-type' => 'text/event-stream']));
+        self::assertTrue($buffer->streamed());
+        self::assertSame('', $buffer->body());
+    }
 }

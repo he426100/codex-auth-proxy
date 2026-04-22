@@ -45,6 +45,14 @@ final class UpstreamHeaderFactoryTest extends TestCase
         self::assertSame('application/json', $headers['Accept']);
     }
 
+    public function testDoesNotInjectDefaultBetaFeaturesOnHttpRequests(): void
+    {
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+        $headers = (new UpstreamHeaderFactory('codex-cli-test', 'multi_agent'))->build([], $account, 'api.openai.com', false);
+
+        self::assertArrayNotHasKey('X-Codex-Beta-Features', $headers);
+    }
+
     public function testBuildsCodexWebSocketHeaders(): void
     {
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));

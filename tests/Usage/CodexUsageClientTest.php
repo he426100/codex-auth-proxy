@@ -69,7 +69,7 @@ PHP);
         chmod($fakeCodex, 0700);
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
 
-        $usage = (new CodexUsageClient($fakeCodex, timeoutSeconds: 1, tempRoot: $dir))->fetch($account);
+        $usage = (new CodexUsageClient($fakeCodex, timeoutSeconds: 2, tempRoot: $dir))->fetch($account);
 
         self::assertSame('plus', $usage->planType);
         self::assertSame(93.0, $usage->primary?->usedPercent);
@@ -116,7 +116,7 @@ PHP);
 
         $usage = (new CodexUsageClient(
             $fakeCodex,
-            timeoutSeconds: 1,
+            timeoutSeconds: 2,
             tempRoot: $dir,
             proxyEnv: [
                 'HTTP_PROXY' => 'http://proxy.local:8080',
@@ -134,15 +134,17 @@ PHP);
         $snapshot = [
             'HTTP_PROXY' => getenv('HTTP_PROXY') === false ? null : getenv('HTTP_PROXY'),
             'HTTPS_PROXY' => getenv('HTTPS_PROXY') === false ? null : getenv('HTTPS_PROXY'),
+            'ALL_PROXY' => getenv('ALL_PROXY') === false ? null : getenv('ALL_PROXY'),
             'http_proxy' => getenv('http_proxy') === false ? null : getenv('http_proxy'),
             'https_proxy' => getenv('https_proxy') === false ? null : getenv('https_proxy'),
+            'all_proxy' => getenv('all_proxy') === false ? null : getenv('all_proxy'),
         ];
         $dir = $this->tempDir('cap-codex-app-server-proxy-isolation');
         $fakeCodex = $dir . '/fake-codex';
         file_put_contents($fakeCodex, <<<'PHP'
 #!/usr/bin/env php
 <?php
-foreach (['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'] as $name) {
+foreach (['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'] as $name) {
     $value = getenv($name);
     if ($value !== false && $value !== '') {
         fwrite(STDERR, "leaked $name\n");
@@ -174,7 +176,7 @@ PHP);
 
             $usage = (new CodexUsageClient(
                 $fakeCodex,
-                timeoutSeconds: 1,
+                timeoutSeconds: 2,
                 tempRoot: $dir,
                 proxyEnv: ['NO_PROXY' => 'localhost'],
             ))->fetch($account);

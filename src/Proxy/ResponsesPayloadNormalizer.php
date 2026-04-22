@@ -59,14 +59,6 @@ final class ResponsesPayloadNormalizer
             }
         }
 
-        foreach (['context_management', 'max_output_tokens', 'max_completion_tokens', 'temperature', 'top_p', 'truncation', 'user'] as $field) {
-            unset($payload->{$field});
-        }
-
-        if (property_exists($payload, 'service_tier') && $payload->service_tier !== 'priority') {
-            unset($payload->service_tier);
-        }
-
         $this->normalizeBuiltinTools($payload);
     }
 

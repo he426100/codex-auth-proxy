@@ -178,7 +178,7 @@ final class CodexUsageClient implements UsageClient
     {
         $env = getenv();
         $env['CODEX_HOME'] = $codexHome;
-        foreach (['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] as $key) {
+        foreach (['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'no_proxy', 'all_proxy'] as $key) {
             unset($env[$key]);
         }
         foreach ($this->proxyEnv as $key => $value) {

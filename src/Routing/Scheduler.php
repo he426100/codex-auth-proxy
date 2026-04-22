@@ -61,11 +61,11 @@ final class Scheduler
         }
     }
 
-    public function switchAfterHardFailure(string $sessionKey, int $cooldownSeconds): CodexAccount
+    public function switchAfterHardFailure(string $sessionKey, int $cooldownSeconds, ?string $cooldownReason = null): CodexAccount
     {
         $failedAccountId = $this->state->sessionAccount($sessionKey);
         if ($failedAccountId !== null) {
-            $this->state->setCooldownUntil($failedAccountId, $this->now() + $cooldownSeconds);
+            $this->state->setCooldown($failedAccountId, $this->now() + $cooldownSeconds, $cooldownReason);
         }
 
         $replacement = $this->selectAvailable($failedAccountId);
