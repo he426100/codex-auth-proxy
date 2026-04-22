@@ -28,7 +28,7 @@ final class ExportCommand extends ProxyCommand
             ->addArgument('name', InputArgument::OPTIONAL, 'Account name for auth export')
             ->addOption('host', null, InputOption::VALUE_REQUIRED, 'Proxy listen host')
             ->addOption('port', null, InputOption::VALUE_REQUIRED, 'Proxy listen port')
-            ->addOption('apply', null, InputOption::VALUE_NONE, 'Prompt before applying exported files to ~/.codex')
+            ->addOption('apply', null, InputOption::VALUE_NONE, 'Prompt before applying exported config.toml to ~/.codex')
             ->addOption('yes', 'y', InputOption::VALUE_NONE, 'Skip apply confirmation prompt');
         $this->addPathOptions();
     }
@@ -161,9 +161,7 @@ final class ExportCommand extends ProxyCommand
         }
 
         if (isset($paths['auth'])) {
-            $target = $config->home . '/.codex/auth.json';
-            $this->backupAndCopy($paths['auth'], $target, 0600);
-            $output->writeln('Applied auth to ' . $target);
+            $output->writeln('Skipped applying auth to ~/.codex/auth.json; the proxy uses its own account store.');
         }
     }
 
@@ -173,7 +171,7 @@ final class ExportCommand extends ProxyCommand
         if (!$helper instanceof QuestionHelper) {
             throw new RuntimeException('Question helper is unavailable');
         }
-        $question = new ConfirmationQuestion('Apply exported files to ~/.codex after creating backups? [y/N] ', false);
+        $question = new ConfirmationQuestion('Apply exported config.toml to ~/.codex after creating a backup? [y/N] ', false);
 
         return (bool) $helper->ask($input, $output, $question);
     }

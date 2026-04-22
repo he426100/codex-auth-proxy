@@ -166,12 +166,13 @@ bin/codex-auth-proxy export all account-a
 bin/codex-auth-proxy export all account-a --apply
 ```
 
-命令会先交互确认。确认后先备份当前文件，再覆盖：
+命令会先交互确认。确认后只备份并覆盖 Codex CLI 的 `config.toml`：
 
 ```text
 ~/.codex/config.toml.bak.YYYYmmddHHMMSS
-~/.codex/auth.json.bak.YYYYmmddHHMMSS
 ```
+
+`export auth` 只导出到 `~/.config/codex-auth-proxy/auth.json`。本项目代理请求时使用自己的账号库注入 OAuth token，不依赖也不会通过 `--apply` 覆盖 `~/.codex/auth.json`。
 
 ## 配置 Codex CLI
 

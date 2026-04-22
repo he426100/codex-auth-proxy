@@ -73,13 +73,15 @@ Exports are written to:
 
 `export config` reads `~/.codex/config.toml`, replaces or prepends only the leading `openai_base_url`, and preserves the rest of the file, including project and MCP settings.
 
-Use `--apply` to prompt before backing up and overwriting Codex CLI's active files:
+Use `--apply` to prompt before backing up and overwriting Codex CLI's active `config.toml`:
 
 ```bash
 bin/codex-auth-proxy export all account-a --apply
 ```
 
-Existing files are backed up as `~/.codex/config.toml.bak.YYYYmmddHHMMSS` and `~/.codex/auth.json.bak.YYYYmmddHHMMSS` before being overwritten.
+The existing config is backed up as `~/.codex/config.toml.bak.YYYYmmddHHMMSS` before being overwritten.
+
+`export auth` only writes `~/.config/codex-auth-proxy/auth.json`. The proxy injects OAuth tokens from its own account store and does not rely on or overwrite `~/.codex/auth.json` through `--apply`.
 
 Validate imported accounts:
 

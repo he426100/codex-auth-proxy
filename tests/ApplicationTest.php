@@ -191,7 +191,7 @@ final class ApplicationTest extends TestCase
         self::assertSame($this->accountFixture('alpha')['tokens']['access_token'], $exported['tokens']['access_token']);
     }
 
-    public function testApplyExportsBacksUpAndOverwritesCodexFilesAfterConfirmation(): void
+    public function testApplyExportsOnlyBacksUpAndOverwritesCodexConfigAfterConfirmation(): void
     {
         $home = $this->tempDir('cap-home');
         $codexDir = $home . '/.codex';
@@ -218,10 +218,12 @@ final class ApplicationTest extends TestCase
 
         self::assertSame(0, $code);
         self::assertStringStartsWith('openai_base_url = "http://127.0.0.1:1456/v1"', (string) file_get_contents($codexDir . '/config.toml'));
-        $auth = json_decode((string) file_get_contents($codexDir . '/auth.json'), true, flags: JSON_THROW_ON_ERROR);
-        self::assertSame($this->accountFixture('alpha')['tokens']['access_token'], $auth['tokens']['access_token']);
+        $codexAuth = json_decode((string) file_get_contents($codexDir . '/auth.json'), true, flags: JSON_THROW_ON_ERROR);
+        $proxyAuth = json_decode((string) file_get_contents($home . '/.config/codex-auth-proxy/auth.json'), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame($this->accountFixture('beta')['tokens']['access_token'], $codexAuth['tokens']['access_token']);
+        self::assertSame($this->accountFixture('alpha')['tokens']['access_token'], $proxyAuth['tokens']['access_token']);
         self::assertCount(1, glob($codexDir . '/config.toml.bak.*') ?: []);
-        self::assertCount(1, glob($codexDir . '/auth.json.bak.*') ?: []);
+        self::assertSame([], glob($codexDir . '/auth.json.bak.*') ?: []);
     }
 
     public function testAccountsListShowsPlanType(): void
