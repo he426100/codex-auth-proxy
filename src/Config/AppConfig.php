@@ -19,6 +19,7 @@ final class AppConfig
         public readonly string $logLevel,
         public readonly string $codexUserAgent,
         public readonly string $codexBetaFeatures,
+        public readonly string $traceDir,
         public readonly ?string $httpProxy,
         public readonly ?string $httpsProxy,
         public readonly string $noProxy,

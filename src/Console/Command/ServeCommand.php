@@ -6,6 +6,7 @@ namespace CodexAuthProxy\Console\Command;
 
 use CodexAuthProxy\Config\AppConfigLoader;
 use CodexAuthProxy\Network\OutboundProxyConfig;
+use CodexAuthProxy\Observability\RequestTraceLogger;
 use CodexAuthProxy\Proxy\CodexProxyServer;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Console\Attribute\AsCommand;
@@ -47,6 +48,7 @@ final class ServeCommand extends ProxyCommand
             outboundProxyConfig: $outboundProxyConfig,
             codexUserAgent: $config->codexUserAgent,
             codexBetaFeatures: $config->codexBetaFeatures,
+            requestTraceLogger: new RequestTraceLogger($config->traceDir),
         ))->start();
 
         return self::SUCCESS;

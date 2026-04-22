@@ -34,6 +34,18 @@ final class OutboundProxyConfigTest extends TestCase
         self::assertSame('pass', $options['http_proxy_password']);
     }
 
+    public function testParsesSocks5ProxyUrlForSwoole(): void
+    {
+        $config = $this->config('socks5://user:pass@proxy.local:1080', null, '');
+
+        $options = OutboundProxyConfig::fromAppConfig($config)->swooleOptionsFor('chatgpt.com');
+
+        self::assertSame('proxy.local', $options['socks5_host']);
+        self::assertSame(1080, $options['socks5_port']);
+        self::assertSame('user', $options['socks5_username']);
+        self::assertSame('pass', $options['socks5_password']);
+    }
+
     public function testUsesConfiguredHttpsProxySlotForSwooleWhenProxyUsesHttpScheme(): void
     {
         $config = $this->config('http://proxy.local:8080', 'http://secure.local:8443', '');
@@ -49,7 +61,7 @@ final class OutboundProxyConfigTest extends TestCase
         $proxy = OutboundProxyConfig::fromAppConfig($this->config(null, 'https://secure.local:8443', ''));
 
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('Swoole upstream proxy requires an http:// proxy URL');
+        $this->expectExceptionMessage('Swoole upstream proxy requires an http:// or socks5:// proxy URL');
 
         $proxy->swooleOptionsFor('chatgpt.com');
     }
@@ -113,7 +125,7 @@ final class OutboundProxyConfigTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Unsupported proxy scheme');
 
-        OutboundProxyConfig::fromAppConfig($this->config('socks5://proxy.local:1080', null, ''));
+        OutboundProxyConfig::fromAppConfig($this->config('ftp://proxy.local:1080', null, ''));
     }
 
     private function config(?string $httpProxy, ?string $httpsProxy, string $noProxy): AppConfig
@@ -131,6 +143,7 @@ final class OutboundProxyConfigTest extends TestCase
             logLevel: 'warning',
             codexUserAgent: 'ua',
             codexBetaFeatures: 'multi_agent',
+            traceDir: '/tmp/traces',
             httpProxy: $httpProxy,
             httpsProxy: $httpsProxy,
             noProxy: $noProxy,

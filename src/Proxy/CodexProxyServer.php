@@ -8,6 +8,8 @@ use CodexAuthProxy\Account\AccountRepository;
 use CodexAuthProxy\Account\CodexAccount;
 use CodexAuthProxy\Auth\TokenRefresher;
 use CodexAuthProxy\Network\OutboundProxyConfig;
+use CodexAuthProxy\Observability\RequestIdFactory;
+use CodexAuthProxy\Observability\RequestTraceLogger;
 use CodexAuthProxy\Routing\ErrorClassifier;
 use CodexAuthProxy\Routing\Scheduler;
 use CodexAuthProxy\Routing\StateStore;
@@ -39,6 +41,8 @@ final class CodexProxyServer
         private readonly ?OutboundProxyConfig $outboundProxyConfig = null,
         private readonly string $codexUserAgent = 'codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0',
         private readonly string $codexBetaFeatures = 'multi_agent',
+        private readonly ?RequestTraceLogger $requestTraceLogger = null,
+        private readonly RequestIdFactory $requestIdFactory = new RequestIdFactory(),
     ) {
         $this->activeLogger = $logger ?? new NullLogger();
         $this->activeTokenRefresher = $tokenRefresher ?? new TokenRefresher(proxy: $outboundProxyConfig?->guzzleProxy() ?? []);
@@ -46,9 +50,7 @@ final class CodexProxyServer
 
     public function start(): void
     {
-        if (!extension_loaded('swoole')) {
-            throw new RuntimeException('The swoole extension is required for serve');
-        }
+        $this->assertSwooleLoaded();
 
         $repository = new AccountRepository($this->accountsDir);
         $accounts = $repository->load();
@@ -61,14 +63,60 @@ final class CodexProxyServer
         $retryTracker = new WebSocketRetryTracker();
         $this->activeLogger->info('Loaded Codex accounts', ['count' => count($accounts)]);
 
+        $server = $this->makeServer();
+        $this->registerServerCallbacks(
+            $server,
+            $scheduler,
+            $classifier,
+            $repository,
+            $extractor,
+            $headers,
+            $payloadNormalizer,
+            $normalizer,
+            $retryTracker,
+        );
+
+        $server->start();
+    }
+
+    private function assertSwooleLoaded(): void
+    {
+        if (!extension_loaded('swoole')) {
+            throw new RuntimeException('The swoole extension is required for serve');
+        }
+    }
+
+    private function makeServer(): Server
+    {
         $server = new Server($this->host, $this->port);
-        $server->set([
+
+        $server->set($this->serverSettings());
+
+        return $server;
+    }
+
+    /** @return array<string,bool|int> */
+    private function serverSettings(): array
+    {
+        return [
             'worker_num' => 1,
             'enable_coroutine' => true,
             'http_compression' => false,
             'websocket_compression' => false,
-        ]);
+        ];
+    }
 
+    private function registerServerCallbacks(
+        Server $server,
+        Scheduler $scheduler,
+        ErrorClassifier $classifier,
+        AccountRepository $repository,
+        SessionKeyExtractor $extractor,
+        UpstreamHeaderFactory $headers,
+        ResponsesPayloadNormalizer $payloadNormalizer,
+        ResponsesWebSocketNormalizer $normalizer,
+        WebSocketRetryTracker $retryTracker,
+    ): void {
         /** @var array<int,Request> $websocketRequests */
         $websocketRequests = [];
         /** @var array<int,Client> $websocketClients */
@@ -101,7 +149,18 @@ final class CodexProxyServer
             $this->handleHttp($request, $response, $scheduler, $classifier, $repository, $extractor, $headers, $payloadNormalizer);
         });
 
-        $server->start();
+        $server->on($this->shutdownEvent(), function () use (&$websocketClients): void {
+            foreach ($websocketClients as $client) {
+                $client->close();
+            }
+            $websocketClients = [];
+            $this->activeLogger->info('Codex auth proxy stopped');
+        });
+    }
+
+    private function shutdownEvent(): string
+    {
+        return 'shutdown';
     }
 
     private function handleHttp(
@@ -122,6 +181,7 @@ final class CodexProxyServer
         }
 
         $rawBody = $request->rawContent() ?: '';
+        $requestId = $this->requestIdFactory->fromHeaders($request->header ?? []);
         $sessionKey = $extractor->extract($request->header ?? [], $rawBody);
         $body = $payloadNormalizer->normalizeHttp($rawBody);
         $account = $this->freshAccount($scheduler->accountForSession($sessionKey->primary, $sessionKey->fallback), $repository, $scheduler);
@@ -129,18 +189,27 @@ final class CodexProxyServer
         $classification = $classifier->classify($result['status'], $result['body'], $result['headers']);
 
         if (!$classification->hardSwitch()) {
+            if ($result['status'] >= 400) {
+                $this->traceUpstreamError($requestId, 'http', 'upstream_response', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
+            }
             $this->finishBufferedError($response, $result);
             return;
         }
 
         $cooldownSeconds = max(1, $classification->cooldownUntil() - time());
         $this->activeLogger->warning('Switching Codex account after hard failure', [
+            'request_id' => $requestId,
             'session' => $sessionKey->primary,
             'type' => $classification->type(),
             'cooldown_seconds' => $cooldownSeconds,
         ]);
+        $this->traceUpstreamError($requestId, 'http', 'hard_switch', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
         $replacement = $this->freshAccount($scheduler->switchAfterHardFailure($sessionKey->primary, $cooldownSeconds), $repository, $scheduler);
         $retry = $this->forward($request, $response, $replacement, $body, $headers, false);
+        if ($retry['status'] >= 400) {
+            $retryClassification = $classifier->classify($retry['status'], $retry['body'], $retry['headers']);
+            $this->traceUpstreamError($requestId, 'http', 'retry_response', $sessionKey, $replacement, $retry['status'], $retry['body'], $retryClassification->type());
+        }
         $this->finishBufferedError($response, $retry);
     }
 
@@ -173,6 +242,7 @@ final class CodexProxyServer
         $client = $websocketClients[$fd] ?? null;
         $rawPayload = (string) $frame->data;
         $payload = $normalizer->normalize($rawPayload);
+        $requestId = $this->requestIdFactory->fromHeaders($request->header ?? []);
         $sessionKey = $extractor->extract($request->header ?? [], $rawPayload);
         $websocketLastPayloads[$fd] = [
             'payload' => $payload,
@@ -180,13 +250,17 @@ final class CodexProxyServer
             'sessionKey' => $sessionKey,
         ];
         if ($client === null) {
+            $account = null;
             try {
                 $account = $this->freshAccount($scheduler->accountForSession($sessionKey->primary, $sessionKey->fallback), $repository, $scheduler);
                 $client = $this->openUpstreamWebSocket($request, $account, $headers);
                 $websocketClients[$fd] = $client;
                 $this->startUpstreamWebSocketReader($server, $fd, $client, $request, $websocketClients, $websocketLastPayloads, $scheduler, $classifier, $repository, $headers, $retryTracker);
             } catch (Throwable $throwable) {
-                $this->activeLogger->warning('Upstream WebSocket failed', ['error' => $throwable->getMessage()]);
+                $this->activeLogger->warning('Upstream WebSocket failed', ['request_id' => $requestId, 'error' => $throwable->getMessage()]);
+                if ($account instanceof CodexAccount) {
+                    $this->traceUpstreamError($requestId, 'websocket', 'upstream_upgrade', $sessionKey, $account, 502, $throwable->getMessage(), 'transport');
+                }
                 $this->pushWebSocketError($server, $fd, 502, $throwable->getMessage());
                 return;
             }
@@ -412,6 +486,39 @@ final class CodexProxyServer
                 ],
             ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
             $server->disconnect($fd, 1011, 'upstream error');
+        }
+    }
+
+    private function traceUpstreamError(
+        string $requestId,
+        string $transport,
+        string $phase,
+        SessionKey $sessionKey,
+        CodexAccount $account,
+        int $status,
+        string $message,
+        string $classification,
+    ): void {
+        if ($this->requestTraceLogger === null) {
+            return;
+        }
+
+        try {
+            $this->requestTraceLogger->error([
+                'request_id' => $requestId,
+                'transport' => $transport,
+                'phase' => $phase,
+                'session' => $sessionKey->primary,
+                'account' => $account->name(),
+                'status' => $status,
+                'classification' => $classification,
+                'message' => $message,
+            ]);
+        } catch (Throwable $throwable) {
+            $this->activeLogger->warning('Failed to write request trace', [
+                'request_id' => $requestId,
+                'error' => $throwable->getMessage(),
+            ]);
         }
     }
 

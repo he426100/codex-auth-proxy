@@ -150,6 +150,7 @@ CODEX_AUTH_PROXY_STATE_FILE=/home/me/.config/codex-auth-proxy/state.json
 CODEX_AUTH_PROXY_LOG_LEVEL=warning
 CODEX_AUTH_PROXY_CODEX_USER_AGENT="codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0"
 CODEX_AUTH_PROXY_CODEX_BETA_FEATURES=multi_agent
+CODEX_AUTH_PROXY_TRACE_DIR=/home/me/.config/codex-auth-proxy/traces
 CODEX_AUTH_PROXY_HTTP_PROXY=http://127.0.0.1:7890
 CODEX_AUTH_PROXY_HTTPS_PROXY=http://127.0.0.1:7890
 CODEX_AUTH_PROXY_NO_PROXY=localhost,127.0.0.1,::1
@@ -157,11 +158,13 @@ CODEX_AUTH_PROXY_NO_PROXY=localhost,127.0.0.1,::1
 
 The project intentionally reads only the namespaced proxy variables above. It does not treat shell-level `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, or lowercase variants as application configuration.
 
-Outbound proxy settings are applied to OAuth token exchange, token refresh, `serve` upstream HTTP/SSE and WebSocket connections, and `accounts status` / `accounts refresh` when they spawn `codex app-server`. For the `codex app-server` subprocess, shell-level proxy variables are cleared first, then the resolved project proxy settings are exported as standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
+Outbound proxy settings are applied to OAuth token exchange, token refresh, `serve` upstream HTTP/SSE and WebSocket connections, and `accounts status` / `accounts refresh` when they spawn `codex app-server`. Proxy URLs support `http://` and `socks5://`. For the `codex app-server` subprocess, shell-level proxy variables are cleared first, then the resolved project proxy settings are exported as standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
 
 `CODEX_AUTH_PROXY_NO_PROXY` supports exact hosts/IPs, `localhost`, loopback addresses, host values with ports, `*`, and suffix matching with either `openai.com` or `.openai.com`.
 
-If `serve` logs an upstream WebSocket or HTTPS failure with `status -1`, the Swoole client did not receive an upstream HTTP response. On networks that cannot connect to `chatgpt.com` directly, set `CODEX_AUTH_PROXY_HTTPS_PROXY` to an HTTP proxy URL such as `http://127.0.0.1:7890`. Do not use an `https://` proxy URL for `serve`; Swoole upstream forwarding only supports HTTP proxy configuration.
+When upstream HTTP/WebSocket errors occur, `serve` writes a redacted JSON trace to `CODEX_AUTH_PROXY_TRACE_DIR`. Trace files include request id, transport, phase, session key, account name, status, and a sanitized error summary; they do not store full OAuth tokens or raw authorization headers.
+
+If `serve` logs an upstream WebSocket or HTTPS failure with `status -1`, the Swoole client did not receive an upstream HTTP response. On networks that cannot connect to `chatgpt.com` directly, set `CODEX_AUTH_PROXY_HTTPS_PROXY` to a supported proxy URL such as `http://127.0.0.1:7890` or `socks5://127.0.0.1:7890`. Do not use an `https://` proxy URL for `serve`; Swoole upstream forwarding only supports HTTP and SOCKS5 proxy configuration.
 
 ## Routing Policy
 

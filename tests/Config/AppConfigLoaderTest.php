@@ -32,6 +32,7 @@ final class AppConfigLoaderTest extends TestCase
             self::assertSame('warning', $config->logLevel);
             self::assertSame('codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0', $config->codexUserAgent);
             self::assertSame('multi_agent', $config->codexBetaFeatures);
+            self::assertSame('/tmp/codex-auth-home/.config/codex-auth-proxy/traces', $config->traceDir);
             self::assertNull($config->httpProxy);
             self::assertNull($config->httpsProxy);
             self::assertSame('localhost,127.0.0.1,::1', $config->noProxy);
@@ -52,6 +53,7 @@ final class AppConfigLoaderTest extends TestCase
         try {
             $this->setEnv('CODEX_AUTH_PROXY_HOST', '10.10.10.10');
             $this->setEnv('CODEX_AUTH_PROXY_PORT', '2468');
+            $this->setEnv('CODEX_AUTH_PROXY_TRACE_DIR', '/tmp/codex-traces');
             $this->setEnv('CODEX_AUTH_PROXY_HTTP_PROXY', 'http://auth-http:8888');
             $this->setEnv('CODEX_AUTH_PROXY_HTTPS_PROXY', 'https://auth-https:9443');
             $this->setEnv('CODEX_AUTH_PROXY_NO_PROXY', 'auth.local');
@@ -62,6 +64,7 @@ final class AppConfigLoaderTest extends TestCase
 
             self::assertSame('10.10.10.10', $config->host);
             self::assertSame(2468, $config->port);
+            self::assertSame('/tmp/codex-traces', $config->traceDir);
             self::assertSame('http://auth-http:8888', $config->httpProxy);
             self::assertSame('https://auth-https:9443', $config->httpsProxy);
             self::assertSame('auth.local', $config->noProxy);
@@ -249,6 +252,7 @@ PHP);
             'CODEX_AUTH_PROXY_LOG_LEVEL',
             'CODEX_AUTH_PROXY_CODEX_USER_AGENT',
             'CODEX_AUTH_PROXY_CODEX_BETA_FEATURES',
+            'CODEX_AUTH_PROXY_TRACE_DIR',
             'CODEX_AUTH_PROXY_HTTP_PROXY',
             'CODEX_AUTH_PROXY_HTTPS_PROXY',
             'CODEX_AUTH_PROXY_NO_PROXY',

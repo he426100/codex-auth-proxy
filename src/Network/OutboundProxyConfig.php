@@ -59,8 +59,12 @@ final class OutboundProxyConfig
         if (!is_array($parts) || !isset($parts['host'], $parts['port'])) {
             throw new InvalidArgumentException('Invalid proxy URL: ' . $proxy);
         }
-        if (($parts['scheme'] ?? null) !== 'http') {
-            throw new InvalidArgumentException('Swoole upstream proxy requires an http:// proxy URL: ' . $proxy);
+        $scheme = strtolower((string) ($parts['scheme'] ?? ''));
+        if ($scheme === 'socks5') {
+            return $this->socks5Options($parts);
+        }
+        if ($scheme !== 'http') {
+            throw new InvalidArgumentException('Swoole upstream proxy requires an http:// or socks5:// proxy URL: ' . $proxy);
         }
 
         $options = [
@@ -72,6 +76,26 @@ final class OutboundProxyConfig
         }
         if (isset($parts['pass']) && (string) $parts['pass'] !== '') {
             $options['http_proxy_password'] = rawurldecode((string) $parts['pass']);
+        }
+
+        return $options;
+    }
+
+    /**
+     * @param array{host:string,port:int|string,user?:string,pass?:string} $parts
+     * @return array<string,string|int>
+     */
+    private function socks5Options(array $parts): array
+    {
+        $options = [
+            'socks5_host' => (string) $parts['host'],
+            'socks5_port' => (int) $parts['port'],
+        ];
+        if (isset($parts['user']) && (string) $parts['user'] !== '') {
+            $options['socks5_username'] = rawurldecode((string) $parts['user']);
+        }
+        if (isset($parts['pass']) && (string) $parts['pass'] !== '') {
+            $options['socks5_password'] = rawurldecode((string) $parts['pass']);
         }
 
         return $options;
@@ -153,7 +177,7 @@ final class OutboundProxyConfig
 
         $parts = parse_url($proxy);
         $scheme = is_array($parts) && isset($parts['scheme']) ? strtolower((string) $parts['scheme']) : '';
-        if (!in_array($scheme, ['http', 'https'], true)) {
+        if (!in_array($scheme, ['http', 'https', 'socks5'], true)) {
             throw new InvalidArgumentException('Unsupported proxy scheme: ' . $proxy);
         }
 

@@ -53,6 +53,9 @@ final class AppConfigLoader
                 ?? $this->stringValue($defaults['codex_user_agent'] ?? null),
             'codex_beta_features' => $this->stringValue($overrides['codex_beta_features'] ?? null)
                 ?? $this->stringValue($defaults['codex_beta_features'] ?? null),
+            'trace_dir' => $this->stringValue($overrides['trace_dir'] ?? null)
+                ?? $this->stringValue($defaults['trace_dir'] ?? null)
+                ?? $root . '/traces',
             'http_proxy' => $this->stringValue($overrides['http_proxy'] ?? null)
                 ?? $this->stringValue($defaults['http_proxy'] ?? null),
             'https_proxy' => $this->stringValue($overrides['https_proxy'] ?? null)
@@ -75,6 +78,7 @@ final class AppConfigLoader
          *   log_level:string,
          *   codex_user_agent:string,
          *   codex_beta_features:string,
+         *   trace_dir:string,
          *   http_proxy:?string,
          *   https_proxy:?string,
          *   no_proxy:string
@@ -95,6 +99,7 @@ final class AppConfigLoader
             $processed['log_level'],
             $processed['codex_user_agent'],
             $processed['codex_beta_features'],
+            $processed['trace_dir'],
             $processed['http_proxy'],
             $processed['https_proxy'],
             $processed['no_proxy'],
