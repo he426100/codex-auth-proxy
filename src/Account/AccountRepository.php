@@ -132,9 +132,25 @@ final class AccountRepository
         ];
 
         $json = json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-        if (file_put_contents($path, $json, LOCK_EX) === false) {
-            throw new RuntimeException('Failed to write account file: ' . $path);
+        $tempPath = tempnam($dir, basename($path) . '.');
+        if ($tempPath === false) {
+            throw new RuntimeException('Failed to create temp account file for: ' . $path);
         }
+
+        try {
+            if (file_put_contents($tempPath, $json, LOCK_EX) === false) {
+                throw new RuntimeException('Failed to write account file: ' . $path);
+            }
+            chmod($tempPath, 0600);
+            if (!rename($tempPath, $path)) {
+                throw new RuntimeException('Failed to replace account file: ' . $path);
+            }
+        } finally {
+            if (is_file($tempPath)) {
+                @unlink($tempPath);
+            }
+        }
+
         chmod($path, 0600);
 
         return $path;

@@ -193,7 +193,7 @@ final class CodexProxyServer
             $authRefreshAttempts = [];
             while (true) {
                 $result = $this->forward($request, $response, $account, $body, $headers, false);
-                $classification = $classifier->classify($result['status'], $result['body'], $result['headers']);
+                $classification = $classifier->classifyHttpResponse($result['status'], $result['body'], $result['headers']);
 
                 if (!$classification->hardSwitch()) {
                     if ($result['status'] >= 400) {
@@ -681,7 +681,7 @@ final class CodexProxyServer
         string $errorBody,
         ErrorClassifier $classifier,
     ): ErrorClassification {
-        $classification = $classifier->classify(200, $errorBody, []);
+        $classification = $classifier->classifyErrorPayload($errorBody);
         $this->traceUpstreamError($requestId, 'websocket', 'upstream_error', $sessionKey, $account, 200, $errorBody, $classification->type());
 
         return $classification;
@@ -771,7 +771,7 @@ final class CodexProxyServer
             return null;
         }
 
-        return $classifier->classify($failure['status'], $failure['body'], []);
+        return $classifier->classifyHttpResponse($failure['status'], $failure['body'], []);
     }
 
     /** @return array{status:int,body:string}|null */
@@ -833,6 +833,8 @@ final class CodexProxyServer
 
     private function accountForSessionWithRecovery(SessionKey $sessionKey, Scheduler $scheduler, AccountRepository $repository): CodexAccount
     {
+        $this->syncSchedulerAccounts($repository, $scheduler);
+
         try {
             return $scheduler->accountForSession($sessionKey->primary, $sessionKey->fallback);
         } catch (RuntimeException $exception) {
@@ -851,6 +853,8 @@ final class CodexProxyServer
         Scheduler $scheduler,
         AccountRepository $repository,
     ): CodexAccount {
+        $this->syncSchedulerAccounts($repository, $scheduler);
+
         try {
             return $scheduler->switchAfterHardFailure($sessionKey->primary, $cooldownSeconds, $cooldownReason);
         } catch (RuntimeException $exception) {
@@ -895,6 +899,17 @@ final class CodexProxyServer
     private function isNoAvailableAccount(RuntimeException $exception): bool
     {
         return $exception->getMessage() === 'No available Codex account';
+    }
+
+    private function syncSchedulerAccounts(AccountRepository $repository, Scheduler $scheduler): void
+    {
+        try {
+            $scheduler->replaceAccounts($repository->load());
+        } catch (Throwable $throwable) {
+            $this->activeLogger->warning('Failed to reload Codex accounts from disk', [
+                'error' => $throwable->getMessage(),
+            ]);
+        }
     }
 
     private function pushWebSocketError(Server $server, int $fd, int $status, string $message): void

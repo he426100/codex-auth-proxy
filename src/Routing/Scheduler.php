@@ -52,12 +52,26 @@ final class Scheduler
 
     public function replaceAccount(CodexAccount $account): void
     {
-        $this->accountsById[$account->accountId()] = $account;
+        $accounts = $this->accounts;
         foreach ($this->accounts as $index => $existing) {
             if ($existing->accountId() === $account->accountId()) {
-                $this->accounts[$index] = $account;
+                $accounts[$index] = $account;
+                $this->replaceAccounts($accounts);
                 return;
             }
+        }
+
+        $accounts[] = $account;
+        $this->replaceAccounts($accounts);
+    }
+
+    /** @param list<CodexAccount> $accounts */
+    public function replaceAccounts(array $accounts): void
+    {
+        $this->accounts = $accounts;
+        $this->accountsById = [];
+        foreach ($this->accounts as $account) {
+            $this->accountsById[$account->accountId()] = $account;
         }
     }
 

@@ -427,6 +427,72 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
+    public function testReloadsUpdatedAccountFileBeforeHandlingRequest(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-account-reload');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+
+        $stale = $this->accountFixture('alpha');
+        $freshPayload = [
+            'iss' => 'https://auth.openai.com',
+            'email' => 'alpha@example.com',
+            'exp' => self::FIXTURE_EXP,
+            'fresh' => true,
+            'https://api.openai.com/auth' => [
+                'chatgpt_account_id' => 'acct-alpha',
+                'chatgpt_plan_type' => 'plus',
+                'chatgpt_user_id' => 'user-alpha',
+            ],
+        ];
+        $fresh = $this->accountFixture('alpha', [
+            'tokens' => [
+                'id_token' => $this->makeJwt($freshPayload),
+                'access_token' => $this->makeJwt($freshPayload),
+                'refresh_token' => 'rt-alpha-fresh',
+            ],
+        ]);
+        $accountPath = $accountsDir . '/alpha.account.json';
+        $this->writeJson($accountPath, $stale);
+
+        $captureFile = $home . '/upstream-requests.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-auth-refresh-upstream.php', (string) $upstreamPort, $captureFile, $fresh['tokens']['access_token']], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $this->writeJson($accountPath, $fresh);
+
+            $http = new GuzzleClient(['http_errors' => false, 'timeout' => 5]);
+            $response = $http->post("http://127.0.0.1:{$proxyPort}/v1/responses/compact", [
+                'headers' => [
+                    'Content-Type' => 'application/json',
+                    'X-Request-Id' => 'integration-account-reload',
+                ],
+                'body' => '{"input":"hello"}',
+            ]);
+
+            self::assertSame(200, $response->getStatusCode());
+            self::assertSame('{"id":"resp_fresh","object":"response.compaction"}', (string) $response->getBody());
+
+            $attempts = $this->waitForJsonLines($captureFile, 1);
+            self::assertCount(1, $attempts);
+            self::assertSame('Bearer ' . $fresh['tokens']['access_token'], $attempts[0]['authorization']);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
     public function testRecoversAuthCooldownAccountWhenNoAccountIsAvailable(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {

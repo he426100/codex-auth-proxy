@@ -206,4 +206,21 @@ final class SchedulerTest extends TestCase
         self::assertTrue($availability->routable);
         self::assertSame('acct-alpha', $account->accountId());
     }
+
+    public function testReplacesBoundSessionAccountWithReloadedTokens(): void
+    {
+        $validator = new AccountFileValidator();
+        $stale = $validator->validate($this->accountFixture('alpha'));
+        $fresh = $stale->withTokens('id-fresh', 'access-fresh', 'refresh-fresh');
+        $scheduler = new Scheduler([$stale], StateStore::memory(), static fn (): int => 1000);
+
+        $bound = $scheduler->accountForSession('thread-reload');
+        self::assertNotSame('access-fresh', $bound->accessToken());
+
+        $scheduler->replaceAccounts([$fresh]);
+        $reloaded = $scheduler->accountForSession('thread-reload');
+
+        self::assertSame('acct-alpha', $reloaded->accountId());
+        self::assertSame('access-fresh', $reloaded->accessToken());
+    }
 }

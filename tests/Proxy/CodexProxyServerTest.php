@@ -4,12 +4,16 @@ declare(strict_types=1);
 
 namespace CodexAuthProxy\Tests\Proxy;
 
+use CodexAuthProxy\Account\AccountFileValidator;
+use CodexAuthProxy\Account\AccountRepository;
 use CodexAuthProxy\Config\AppConfig;
 use CodexAuthProxy\Network\OutboundProxyConfig;
 use CodexAuthProxy\Observability\RequestTraceLogger;
 use CodexAuthProxy\Proxy\CodexProxyServer;
 use CodexAuthProxy\Proxy\SessionKey;
 use CodexAuthProxy\Routing\ErrorClassifier;
+use CodexAuthProxy\Routing\Scheduler;
+use CodexAuthProxy\Routing\StateStore;
 use CodexAuthProxy\Tests\TestCase;
 use ReflectionMethod;
 
@@ -210,6 +214,59 @@ final class CodexProxyServerTest extends TestCase
         );
 
         self::assertSame([], glob($traceDir . '/*.json') ?: []);
+    }
+
+    public function testReloadsSchedulerAccountsFromDisk(): void
+    {
+        $accountsDir = $this->tempDir('proxy-account-sync');
+        $validator = new AccountFileValidator();
+        $stale = $validator->validate($this->accountFixture('alpha'));
+        $freshPayload = [
+            'iss' => 'https://auth.openai.com',
+            'email' => 'alpha@example.com',
+            'exp' => self::FIXTURE_EXP,
+            'fresh' => true,
+            'https://api.openai.com/auth' => [
+                'chatgpt_account_id' => 'acct-alpha',
+                'chatgpt_plan_type' => 'plus',
+                'chatgpt_user_id' => 'user-alpha',
+            ],
+        ];
+        $freshToken = $this->makeJwt($freshPayload);
+        $scheduler = new Scheduler([$stale], StateStore::memory(), static fn (): int => 1000);
+        $bound = $scheduler->accountForSession('thread-sync');
+        self::assertNotSame($freshToken, $bound->accessToken());
+
+        $this->writeJson($accountsDir . '/alpha.account.json', [
+            'schema' => 'codex-auth-proxy.account.v1',
+            'provider' => 'openai-chatgpt-codex',
+            'name' => 'alpha',
+            'enabled' => true,
+            'tokens' => [
+                'id_token' => $freshToken,
+                'access_token' => $freshToken,
+                'refresh_token' => 'refresh-fresh',
+                'account_id' => 'acct-alpha',
+            ],
+            'metadata' => [
+                'email' => 'alpha@example.com',
+                'plan_type' => 'plus',
+            ],
+        ]);
+
+        $server = new CodexProxyServer(
+            host: '127.0.0.1',
+            port: 1456,
+            accountsDir: $accountsDir,
+            stateFile: '/tmp/state.json',
+            defaultCooldownSeconds: 18000,
+        );
+        $method = new ReflectionMethod(CodexProxyServer::class, 'syncSchedulerAccounts');
+        $method->invoke($server, new AccountRepository($accountsDir), $scheduler);
+
+        $reloaded = $scheduler->accountForSession('thread-sync');
+        self::assertSame('acct-alpha', $reloaded->accountId());
+        self::assertSame($freshToken, $reloaded->accessToken());
     }
 
     public function testBuildsStructuredProxyUnavailablePayload(): void

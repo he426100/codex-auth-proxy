@@ -119,6 +119,8 @@ bin/codex-auth-proxy accounts status account-a
 
 `accounts refresh` 会复用现有的 usage reader 读取实时 Codex quota，然后更新本地 state cache。可以针对单个账号刷新，也可以不带账号名一次刷新全部账号。
 
+`serve` 会在处理新请求前重读账号目录，因此 `accounts refresh`、`login`、`import` 或外部更新 `.account.json` 后，不需要重启代理进程就会生效。
+
 `status` 会为目标账号创建临时隔离的 `CODEX_HOME`，写入该账号的 `auth.json`，再调用本机 `codex app-server` 的 `account/rateLimits/read` 方法查询 Codex 额度。这样使用 Codex CLI 自己的额度读取逻辑，不依赖本项目猜测远端 usage URL。
 
 输出类似 Codex CLI `/status` 的关键信息：

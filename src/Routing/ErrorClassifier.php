@@ -13,18 +13,19 @@ final class ErrorClassifier
     /** @param array<string,string> $headers */
     public function classify(int $statusCode, string $body, array $headers = [], ?int $now = null): ErrorClassification
     {
+        return $this->classifyHttpResponse($statusCode, $body, $headers, $now);
+    }
+
+    /** @param array<string,string> $headers */
+    public function classifyHttpResponse(int $statusCode, string $body, array $headers = [], ?int $now = null): ErrorClassification
+    {
         $now ??= time();
-        $bodyLower = strtolower($body);
 
         if ($statusCode === 401 || $statusCode === 403) {
             return new ErrorClassification('auth', true, $now + $this->authCooldownSeconds);
         }
 
-        if ($this->containsAuthSignal($bodyLower)) {
-            return new ErrorClassification('auth', true, $now + $this->authCooldownSeconds);
-        }
-
-        if ($statusCode === 429 || $this->containsQuotaSignal($bodyLower)) {
+        if ($statusCode === 429) {
             return new ErrorClassification('quota', true, $this->cooldownUntil($body, $headers, $now));
         }
 
@@ -32,29 +33,159 @@ final class ErrorClassifier
             return new ErrorClassification('transient', false, 0);
         }
 
+        if (!$this->hasExplicitErrorPayload($body)) {
+            return new ErrorClassification('none', false, 0);
+        }
+
+        return $this->classifyExplicitErrorPayload($body, $headers, $now);
+    }
+
+    public function classifyErrorPayload(string $body, ?int $now = null): ErrorClassification
+    {
+        $now ??= time();
+
+        return $this->classifyExplicitErrorPayload($body, [], $now);
+    }
+
+    /** @param array<string,string> $headers */
+    private function classifyExplicitErrorPayload(string $body, array $headers, int $now): ErrorClassification
+    {
+        $fields = $this->errorFields($body);
+        if ($fields === null) {
+            return new ErrorClassification('none', false, 0);
+        }
+
+        if ($this->containsAuthSignal($fields)) {
+            return new ErrorClassification('auth', true, $now + $this->authCooldownSeconds);
+        }
+
+        if ($this->containsQuotaSignal($fields)) {
+            return new ErrorClassification('quota', true, $this->cooldownUntil($body, $headers, $now));
+        }
+
+        if ($this->containsTransientSignal($fields)) {
+            return new ErrorClassification('transient', false, 0);
+        }
+
         return new ErrorClassification('none', false, 0);
     }
 
-    private function containsAuthSignal(string $bodyLower): bool
+    /** @param list<string> $fields */
+    private function containsAuthSignal(array $fields): bool
     {
-        foreach (['invalid_token', 'unauthorized', 'authentication_error', 'expired token', 'token expired'] as $needle) {
-            if (str_contains($bodyLower, $needle)) {
-                return true;
+        return $this->containsSignal($fields, [
+            'invalid_token',
+            'token_invalidated',
+            'unauthorized',
+            'authentication_error',
+            'expired token',
+            'token expired',
+            'authentication token has been invalidated',
+        ]);
+    }
+
+    /** @param list<string> $fields */
+    private function containsQuotaSignal(array $fields): bool
+    {
+        return $this->containsSignal($fields, [
+            'usage_limit_reached',
+            'quota_exceeded',
+            'insufficient_quota',
+            'rate_limit_exceeded',
+            'over limit',
+            'too many requests',
+            'usagelimitexceeded',
+        ]);
+    }
+
+    /** @param list<string> $fields */
+    private function containsTransientSignal(array $fields): bool
+    {
+        return $this->containsSignal($fields, [
+            'server_error',
+            'internal_server_error',
+            'httpconnectionfailed',
+            'responsestreamconnectionfailed',
+            'responsestreamdisconnected',
+        ]);
+    }
+
+    /** @param list<string> $fields
+     *  @param list<string> $needles
+     */
+    private function containsSignal(array $fields, array $needles): bool
+    {
+        foreach ($fields as $field) {
+            foreach ($needles as $needle) {
+                if (str_contains($field, $needle)) {
+                    return true;
+                }
             }
         }
 
         return false;
     }
 
-    private function containsQuotaSignal(string $bodyLower): bool
+    private function hasExplicitErrorPayload(string $body): bool
     {
-        foreach (['usage_limit_reached', 'quota_exceeded', 'insufficient_quota', 'rate_limit_exceeded', 'over limit', 'too many requests'] as $needle) {
-            if (str_contains($bodyLower, $needle)) {
-                return true;
-            }
+        return $this->errorFields($body) !== null;
+    }
+
+    /** @return list<string>|null */
+    private function errorFields(string $body): ?array
+    {
+        $decoded = json_decode($body, true);
+        if (!is_array($decoded)) {
+            return null;
         }
 
-        return false;
+        $error = null;
+        if (isset($decoded['error']) && is_array($decoded['error'])) {
+            $error = $decoded['error'];
+        } elseif (($decoded['type'] ?? null) === 'error') {
+            $error = is_array($decoded['error'] ?? null) ? $decoded['error'] : $decoded;
+        }
+
+        if (!is_array($error)) {
+            return null;
+        }
+
+        $fields = [];
+        foreach ([$decoded, $error] as $source) {
+            $this->appendErrorField($fields, $source['code'] ?? null);
+            $this->appendErrorField($fields, $source['type'] ?? null);
+            $this->appendErrorField($fields, $source['message'] ?? null);
+            $this->appendCodexErrorInfo($fields, $source['codexErrorInfo'] ?? null);
+        }
+
+        return array_values(array_unique($fields));
+    }
+
+    /** @param list<string> $fields */
+    private function appendErrorField(array &$fields, mixed $value): void
+    {
+        if (!is_string($value) || trim($value) === '') {
+            return;
+        }
+
+        $fields[] = strtolower(trim($value));
+    }
+
+    /** @param list<string> $fields */
+    private function appendCodexErrorInfo(array &$fields, mixed $value): void
+    {
+        if (is_string($value)) {
+            $this->appendErrorField($fields, $value);
+            return;
+        }
+
+        if (!is_array($value)) {
+            return;
+        }
+
+        foreach (['type', 'kind', 'name'] as $key) {
+            $this->appendErrorField($fields, $value[$key] ?? null);
+        }
     }
 
     /** @param array<string,string> $headers */

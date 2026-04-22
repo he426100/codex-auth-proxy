@@ -531,9 +531,9 @@ final class AccountsCommand extends ProxyCommand
             ];
         }
 
-        ksort($rows);
+        usort($rows, static fn (array $left, array $right): int => strcmp((string) $left['session_key'], (string) $right['session_key']));
 
-        return array_values($rows);
+        return $rows;
     }
 
     /** @param array<string,mixed> $row */

@@ -109,6 +109,8 @@ bin/codex-auth-proxy accounts delete account-a
 
 `accounts refresh` uses the existing usage reader to fetch the current Codex quota for one account or all accounts, then updates the local state cache.
 
+`serve` reloads the account directory before handling each new request, so `accounts refresh`, `login`, `import`, or external `.account.json` updates take effect without restarting the proxy.
+
 `accounts status` creates a temporary isolated `CODEX_HOME` for the selected account, writes that account's `auth.json`, and calls the local `codex app-server` `account/rateLimits/read` method. This uses Codex CLI's own quota reader instead of guessing remote usage URLs.
 
 It prints the account plan plus the 5h and weekly quota windows:

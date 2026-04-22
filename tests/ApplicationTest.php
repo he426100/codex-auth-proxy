@@ -450,6 +450,42 @@ final class ApplicationTest extends TestCase
         self::assertStringContainsString('cooldown (auth)', $tester->getDisplay());
     }
 
+    public function testAccountsBindingsSortsRowsBySessionKey(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $alphaSource = $home . '/alpha.json';
+        $betaSource = $home . '/beta.json';
+        $this->writeJson($alphaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+        $this->writeJson($betaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('beta')['tokens'],
+        ]);
+
+        mkdir($home . '/.config/codex-auth-proxy', 0700, true);
+        $this->writeJson($home . '/.config/codex-auth-proxy/state.json', [
+            'accounts' => [],
+            'sessions' => [
+                'thread-2' => 'acct-beta',
+                'thread-1' => 'acct-alpha',
+            ],
+            'cursor' => 0,
+            'usage' => [],
+        ]);
+
+        $application = new Application($home);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $alphaSource]);
+        (new CommandTester($application->find('import')))->execute(['name' => 'beta', '--from' => $betaSource]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute(['action' => 'bindings']);
+
+        self::assertSame(0, $code);
+        self::assertTrue(strpos($tester->getDisplay(), 'thread-1') < strpos($tester->getDisplay(), 'thread-2'));
+    }
+
     public function testAccountsBindingsJsonUsesStructuredFieldsAndSessionFilter(): void
     {
         $home = $this->tempDir('cap-home');
