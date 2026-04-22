@@ -9,6 +9,7 @@ use CodexAuthProxy\Network\OutboundProxyConfig;
 use CodexAuthProxy\Observability\RequestTraceLogger;
 use CodexAuthProxy\Proxy\CodexProxyServer;
 use CodexAuthProxy\Proxy\SessionKey;
+use CodexAuthProxy\Routing\ErrorClassifier;
 use CodexAuthProxy\Tests\TestCase;
 use ReflectionMethod;
 
@@ -119,6 +120,59 @@ final class CodexProxyServerTest extends TestCase
         self::assertSame(429, $payload['status']);
         self::assertSame('quota', $payload['classification']);
         self::assertStringNotContainsString('secret-token', $payload['message']);
+    }
+
+    public function testRecordsTraceForWebSocketStreamError(): void
+    {
+        $traceDir = $this->tempDir('proxy-websocket-trace');
+        $server = new CodexProxyServer(
+            host: '127.0.0.1',
+            port: 1456,
+            accountsDir: '/tmp/accounts',
+            stateFile: '/tmp/state.json',
+            defaultCooldownSeconds: 18000,
+            requestTraceLogger: new RequestTraceLogger($traceDir),
+        );
+
+        $method = new ReflectionMethod(CodexProxyServer::class, 'traceWebSocketStreamError');
+        $method->invoke(
+            $server,
+            'req-ws',
+            new SessionKey('session-ws'),
+            $this->account('alpha'),
+            '{"type":"error","error":{"code":"usage_limit_reached","message":"too many requests"}}',
+            new ErrorClassifier(18000),
+        );
+
+        $files = glob($traceDir . '/*.json') ?: [];
+        self::assertCount(1, $files);
+        $payload = json_decode((string) file_get_contents($files[0]), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame('req-ws', $payload['request_id']);
+        self::assertSame('websocket', $payload['transport']);
+        self::assertSame('upstream_error', $payload['phase']);
+        self::assertSame('session-ws', $payload['session']);
+        self::assertSame('alpha', $payload['account']);
+        self::assertSame(200, $payload['status']);
+        self::assertSame('quota', $payload['classification']);
+    }
+
+    public function testBuildsStructuredProxyUnavailablePayload(): void
+    {
+        $server = new CodexProxyServer(
+            host: '127.0.0.1',
+            port: 1456,
+            accountsDir: '/tmp/accounts',
+            stateFile: '/tmp/state.json',
+            defaultCooldownSeconds: 18000,
+        );
+
+        $method = new ReflectionMethod(CodexProxyServer::class, 'proxyUnavailablePayload');
+        $payload = json_decode((string) $method->invoke($server, 'No Codex accounts configured'), true, flags: JSON_THROW_ON_ERROR);
+
+        self::assertSame('error', $payload['type']);
+        self::assertSame('codex_proxy_unavailable', $payload['error']['code']);
+        self::assertSame('No Codex accounts configured', $payload['error']['message']);
+        self::assertSame(503, $payload['error']['status']);
     }
 
     public function testShutdownCleanupUsesSwooleShutdownEvent(): void

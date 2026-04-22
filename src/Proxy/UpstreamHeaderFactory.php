@@ -18,7 +18,7 @@ final class UpstreamHeaderFactory
      * @param array<string,mixed> $downstreamHeaders
      * @return array<string,string>
      */
-    public function build(array $downstreamHeaders, CodexAccount $account, string $host, bool $websocket): array
+    public function build(array $downstreamHeaders, CodexAccount $account, string $host, bool $websocket, ?string $httpAccept = null): array
     {
         $headers = [];
         foreach ($downstreamHeaders as $key => $value) {
@@ -55,7 +55,7 @@ final class UpstreamHeaderFactory
         $headers['Authorization'] = 'Bearer ' . $account->accessToken();
         $headers['Accept-Encoding'] = 'identity';
 
-        $this->setCodexHeaders($headers, $downstreamHeaders, $account, $websocket);
+        $this->setCodexHeaders($headers, $downstreamHeaders, $account, $websocket, $httpAccept);
 
         return $headers;
     }
@@ -64,7 +64,7 @@ final class UpstreamHeaderFactory
      * @param array<string,string> $headers
      * @param array<string,mixed> $downstreamHeaders
      */
-    private function setCodexHeaders(array &$headers, array $downstreamHeaders, CodexAccount $account, bool $websocket): void
+    private function setCodexHeaders(array &$headers, array $downstreamHeaders, CodexAccount $account, bool $websocket, ?string $httpAccept): void
     {
         $betaFeatures = $this->headerValue($downstreamHeaders, 'x-codex-beta-features') ?? $this->betaFeatures;
         if ($betaFeatures !== '') {
@@ -93,7 +93,7 @@ final class UpstreamHeaderFactory
         }
 
         $headers['Content-Type'] = $this->headerValue($downstreamHeaders, 'content-type') ?? 'application/json';
-        $headers['Accept'] = 'text/event-stream';
+        $headers['Accept'] = $httpAccept ?? 'text/event-stream';
         $headers['Connection'] = 'Keep-Alive';
         if ($this->userAgent !== '') {
             $headers['User-Agent'] = $this->headerValue($downstreamHeaders, 'user-agent') ?? $this->userAgent;

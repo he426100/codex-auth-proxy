@@ -147,6 +147,26 @@ final class ApplicationTest extends TestCase
         self::assertStringContainsString("[projects.demo]\ntrust_level = \"trusted\"", $exported);
     }
 
+    public function testExportsConfigTomlReplacesRootOpenAiBaseUrlWithoutDuplicatingKeys(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $codexConfig = $home . '/.codex/config.toml';
+        if (!mkdir(dirname($codexConfig), 0700, true) && !is_dir(dirname($codexConfig))) {
+            self::fail('Failed to create Codex config fixture');
+        }
+        file_put_contents($codexConfig, "# existing root config\nmodel = \"gpt-5.4\"\nopenai_base_url = \"https://api.openai.com/v1\"\n\n[projects.demo]\ntrust_level = \"trusted\"\n");
+
+        $application = new Application($home);
+        $tester = new CommandTester($application->find('export'));
+        $code = $tester->execute(['target' => 'config', '--port' => '1777']);
+
+        self::assertSame(0, $code);
+        $exported = (string) file_get_contents($home . '/.config/codex-auth-proxy/config.toml');
+        self::assertSame(1, substr_count($exported, 'openai_base_url'));
+        self::assertStringContainsString("model = \"gpt-5.4\"\nopenai_base_url = \"http://127.0.0.1:1777/v1\"", $exported);
+        self::assertStringContainsString("[projects.demo]\ntrust_level = \"trusted\"", $exported);
+    }
+
     public function testExportsAuthJsonForSelectedProxyAccount(): void
     {
         $home = $this->tempDir('cap-home');

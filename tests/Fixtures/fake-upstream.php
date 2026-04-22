@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 use Swoole\Http\Request;
 use Swoole\Http\Response;
-use Swoole\Http\Server;
+use Swoole\WebSocket\Frame;
+use Swoole\WebSocket\Server;
 
 require dirname(__DIR__, 2) . '/vendor/autoload.php';
 
@@ -29,11 +30,15 @@ $server->on('request', static function (Request $request, Response $response) us
 
     file_put_contents($captureFile, json_encode([
         'path' => $path,
+        'accept' => (string) ($request->header['accept'] ?? ''),
         'authorization' => (string) ($request->header['authorization'] ?? ''),
         'body' => $request->rawContent(),
     ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
 
     $response->header('Content-Type', 'application/json');
     $response->end('{"id":"resp_1","object":"response.compaction"}');
+});
+$server->on('message', static function (Server $server, Frame $frame): void {
+    $server->push($frame->fd, '{"type":"error","error":{"code":"usage_limit_reached","message":"too many requests"}}');
 });
 $server->start();

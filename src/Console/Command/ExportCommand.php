@@ -87,11 +87,49 @@ final class ExportCommand extends ProxyCommand
     private function withLeadingOpenAiBaseUrl(string $source, string $line): string
     {
         $normalized = str_replace(["\r\n", "\r"], "\n", $source);
-        if (preg_match('/^openai_base_url\s*=.*(?:\n|$)/', $normalized) === 1) {
-            return (string) preg_replace('/^openai_base_url\s*=.*(?:\n|$)/', $line . "\n", $normalized, 1);
+        if ($normalized === '') {
+            return $line . "\n";
         }
 
-        return $normalized === '' ? $line . "\n" : $line . "\n\n" . $normalized;
+        $lines = explode("\n", str_ends_with($normalized, "\n") ? substr($normalized, 0, -1) : $normalized);
+        $tableIndex = count($lines);
+        foreach ($lines as $index => $text) {
+            if (preg_match('/^\s*(?:\[[^\]]+\]|\[\[[^\]]+\]\])\s*(?:#.*)?$/', $text) === 1) {
+                $tableIndex = $index;
+                break;
+            }
+        }
+
+        $root = [];
+        $found = false;
+        foreach (array_slice($lines, 0, $tableIndex) as $text) {
+            if (preg_match('/^\s*openai_base_url\s*=/', $text) === 1) {
+                if (!$found) {
+                    $root[] = $line;
+                    $found = true;
+                }
+                continue;
+            }
+            $root[] = $text;
+        }
+
+        $tail = array_slice($lines, $tableIndex);
+        if (!$found) {
+            if ($root === []) {
+                $root[] = $line;
+                if ($tail !== []) {
+                    $root[] = '';
+                }
+            } else {
+                $insertAt = count($root);
+                while ($insertAt > 0 && trim($root[$insertAt - 1]) === '') {
+                    $insertAt--;
+                }
+                array_splice($root, $insertAt, 0, [$line]);
+            }
+        }
+
+        return implode("\n", array_merge($root, $tail)) . "\n";
     }
 
     private function selectedAccount(AppConfig $config, ?string $name): CodexAccount

@@ -31,6 +31,20 @@ final class UpstreamHeaderFactoryTest extends TestCase
         self::assertArrayNotHasKey('authorization', $headers);
     }
 
+    public function testBuildsJsonAcceptHeaderForBufferedJsonEndpoints(): void
+    {
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+        $headers = (new UpstreamHeaderFactory('codex-cli-test', 'multi_agent'))->build(
+            ['accept' => 'text/event-stream'],
+            $account,
+            'api.openai.com',
+            false,
+            'application/json',
+        );
+
+        self::assertSame('application/json', $headers['Accept']);
+    }
+
     public function testBuildsCodexWebSocketHeaders(): void
     {
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
