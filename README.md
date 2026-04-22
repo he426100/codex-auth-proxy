@@ -136,7 +136,7 @@ The proxy supports Codex HTTP/SSE and WebSocket requests. Requests are mapped fr
 
 ## Configuration
 
-Runtime defaults live in `config/defaults.php`. The config file reads project environment variables with `env('NAME', $default)`, similar to Hyperf-style config files. Copy `.env.example` to `.env` when you need local overrides; `.env` is optional and is not committed.
+Runtime defaults live in `config/defaults.php`. The config file reads project environment variables with `env('NAME', $default)`, similar to Hyperf-style config files. Copy `.env.example` to `.env` when you need local overrides; `.env` is optional and is not committed. By default the loader reads the `.env` next to this project; set `CODEX_AUTH_PROXY_DOTENV_FILE=/path/to/.env` when running a PHAR or when you want an explicit config file.
 
 Runtime defaults can be overridden with CLI options where a command exposes them, or with `CODEX_AUTH_PROXY_*` `.env` variables:
 

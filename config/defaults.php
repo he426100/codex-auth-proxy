@@ -6,8 +6,8 @@ use Symfony\Component\Dotenv\Dotenv;
 
 require_once dirname(__DIR__) . '/src/Config/env.php';
 
-$envFile = (getcwd() ?: '.') . '/.env';
-if (is_file($envFile)) {
+$envFile = env('CODEX_AUTH_PROXY_DOTENV_FILE', dirname(__DIR__) . '/.env');
+if (is_string($envFile) && $envFile !== '' && is_file($envFile)) {
     (new Dotenv())->usePutenv()->loadEnv($envFile);
 }
 

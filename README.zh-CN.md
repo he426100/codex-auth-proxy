@@ -198,7 +198,7 @@ bin/codex-auth-proxy serve --port=1456
 
 ## 配置项
 
-运行时默认值保存在 `config/defaults.php`。配置文件内部使用类似 Hyperf 的 `env('NAME', $default)` 方式读取项目环境变量。需要本地覆盖时，可以复制 `.env.example` 为 `.env`；`.env` 是本地文件，不应提交。
+运行时默认值保存在 `config/defaults.php`。配置文件内部使用类似 Hyperf 的 `env('NAME', $default)` 方式读取项目环境变量。需要本地覆盖时，可以复制 `.env.example` 为 `.env`；`.env` 是本地文件，不应提交。默认会读取项目旁边的 `.env`；使用 PHAR 或需要显式配置文件时，可设置 `CODEX_AUTH_PROXY_DOTENV_FILE=/path/to/.env`。
 
 运行时配置可以通过命令暴露的 CLI 参数，或 `CODEX_AUTH_PROXY_*` `.env` 变量覆盖：
 

@@ -16,6 +16,7 @@ final class AppConfigLoaderTest extends TestCase
 
         try {
             $this->unsetEnvNames($this->proxyEnvNames());
+            $this->disableDotenv();
             chdir($this->tempDir('cap-empty-cwd'));
 
             $config = $this->newLoader()->load();
@@ -51,6 +52,7 @@ final class AppConfigLoaderTest extends TestCase
         $cwd = getcwd();
 
         try {
+            $this->disableDotenv();
             $this->setEnv('CODEX_AUTH_PROXY_HOST', '10.10.10.10');
             $this->setEnv('CODEX_AUTH_PROXY_PORT', '2468');
             $this->setEnv('CODEX_AUTH_PROXY_TRACE_DIR', '/tmp/codex-traces');
@@ -77,7 +79,7 @@ final class AppConfigLoaderTest extends TestCase
         }
     }
 
-    public function testCommittedDefaultsLoadDotenvFromCurrentWorkingDirectory(): void
+    public function testCommittedDefaultsLoadDotenvFromConfiguredFile(): void
     {
         $snapshot = $this->snapshotEnv($this->proxyEnvNames());
         $cwd = getcwd();
@@ -92,7 +94,8 @@ final class AppConfigLoaderTest extends TestCase
 
         try {
             $this->unsetEnvNames($this->proxyEnvNames());
-            chdir($dotenvDir);
+            $this->setEnv('CODEX_AUTH_PROXY_DOTENV_FILE', $dotenvDir . '/.env');
+            chdir($this->tempDir('cap-empty-cwd'));
 
             $config = (new AppConfigLoader())->load();
 
@@ -172,6 +175,7 @@ PHP);
                 'CODEX_AUTH_PROXY_HTTPS_PROXY',
                 'CODEX_AUTH_PROXY_NO_PROXY',
             ]);
+            $this->disableDotenv();
             $this->setEnv('HTTP_PROXY', 'http://standard-http:8080');
             $this->setEnv('http_proxy', 'http://standard-http-lower:8081');
             $this->setEnv('HTTPS_PROXY', 'https://standard-https:8443');
@@ -201,6 +205,7 @@ PHP);
         $cwd = getcwd();
 
         try {
+            $this->disableDotenv();
             $this->setEnv('CODEX_AUTH_PROXY_HOST', '10.10.10.10');
             $this->setEnv('CODEX_AUTH_PROXY_PORT', '2468');
             $this->setEnv('CODEX_AUTH_PROXY_HTTP_PROXY', 'http://auth-http:8888');
@@ -242,6 +247,7 @@ PHP);
             'NO_PROXY',
             'no_proxy',
             'CODEX_AUTH_PROXY_HOME',
+            'CODEX_AUTH_PROXY_DOTENV_FILE',
             'CODEX_AUTH_PROXY_HOST',
             'CODEX_AUTH_PROXY_PORT',
             'CODEX_AUTH_PROXY_ACCOUNTS_DIR',
@@ -317,6 +323,11 @@ PHP);
         $_SERVER[$name] = $value;
         $_ENV[$name] = $value;
         putenv($name . '=' . $value);
+    }
+
+    private function disableDotenv(): void
+    {
+        $this->setEnv('CODEX_AUTH_PROXY_DOTENV_FILE', $this->tempDir('cap-no-dotenv') . '/missing.env');
     }
 
     private function newLoader(): AppConfigLoader

@@ -56,14 +56,12 @@ final class OutboundProxyConfigTest extends TestCase
         self::assertSame(8443, $options['http_proxy_port']);
     }
 
-    public function testRejectsHttpsProxySchemeForSwoole(): void
+    public function testRejectsHttpsProxySchemeAtConfigurationBoundary(): void
     {
-        $proxy = OutboundProxyConfig::fromAppConfig($this->config(null, 'https://secure.local:8443', ''));
-
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('Swoole upstream proxy requires an http:// or socks5:// proxy URL');
+        $this->expectExceptionMessage('Unsupported proxy scheme');
 
-        $proxy->swooleOptionsFor('chatgpt.com');
+        OutboundProxyConfig::fromAppConfig($this->config(null, 'https://secure.local:8443', ''));
     }
 
     public function testBypassesHostsListedInNoProxy(): void

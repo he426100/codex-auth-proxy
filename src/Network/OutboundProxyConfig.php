@@ -177,7 +177,7 @@ final class OutboundProxyConfig
 
         $parts = parse_url($proxy);
         $scheme = is_array($parts) && isset($parts['scheme']) ? strtolower((string) $parts['scheme']) : '';
-        if (!in_array($scheme, ['http', 'https', 'socks5'], true)) {
+        if (!in_array($scheme, ['http', 'socks5'], true)) {
             throw new InvalidArgumentException('Unsupported proxy scheme: ' . $proxy);
         }
 

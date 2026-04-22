@@ -187,32 +187,28 @@ final class CodexProxyServer
         $body = $payloadNormalizer->normalizeHttp($rawBody);
         try {
             $account = $this->freshAccount($scheduler->accountForSession($sessionKey->primary, $sessionKey->fallback), $repository, $scheduler);
-            $result = $this->forward($request, $response, $account, $body, $headers, false);
-            $classification = $classifier->classify($result['status'], $result['body'], $result['headers']);
+            while (true) {
+                $result = $this->forward($request, $response, $account, $body, $headers, false);
+                $classification = $classifier->classify($result['status'], $result['body'], $result['headers']);
 
-            if (!$classification->hardSwitch()) {
-                if ($result['status'] >= 400) {
-                    $this->traceUpstreamError($requestId, 'http', 'upstream_response', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
+                if (!$classification->hardSwitch()) {
+                    if ($result['status'] >= 400) {
+                        $this->traceUpstreamError($requestId, 'http', 'upstream_response', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
+                    }
+                    $this->finishBufferedError($response, $result);
+                    return;
                 }
-                $this->finishBufferedError($response, $result);
-                return;
-            }
 
-            $cooldownSeconds = max(1, $classification->cooldownUntil() - time());
-            $this->activeLogger->warning('Switching Codex account after hard failure', [
-                'request_id' => $requestId,
-                'session' => $sessionKey->primary,
-                'type' => $classification->type(),
-                'cooldown_seconds' => $cooldownSeconds,
-            ]);
-            $this->traceUpstreamError($requestId, 'http', 'hard_switch', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
-            $replacement = $this->freshAccount($scheduler->switchAfterHardFailure($sessionKey->primary, $cooldownSeconds), $repository, $scheduler);
-            $retry = $this->forward($request, $response, $replacement, $body, $headers, false);
-            if ($retry['status'] >= 400) {
-                $retryClassification = $classifier->classify($retry['status'], $retry['body'], $retry['headers']);
-                $this->traceUpstreamError($requestId, 'http', 'retry_response', $sessionKey, $replacement, $retry['status'], $retry['body'], $retryClassification->type());
+                $cooldownSeconds = max(1, $classification->cooldownUntil() - time());
+                $this->activeLogger->warning('Switching Codex account after hard failure', [
+                    'request_id' => $requestId,
+                    'session' => $sessionKey->primary,
+                    'type' => $classification->type(),
+                    'cooldown_seconds' => $cooldownSeconds,
+                ]);
+                $this->traceUpstreamError($requestId, 'http', 'hard_switch', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
+                $account = $this->freshAccount($scheduler->switchAfterHardFailure($sessionKey->primary, $cooldownSeconds), $repository, $scheduler);
             }
-            $this->finishBufferedError($response, $retry);
         } catch (RuntimeException $exception) {
             $this->activeLogger->warning('Codex proxy request unavailable', [
                 'request_id' => $requestId,

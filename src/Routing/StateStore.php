@@ -34,25 +34,12 @@ final class StateStore
 
     public static function file(string $path): self
     {
-        if (!is_file($path)) {
-            return new self(self::defaultState(), $path);
-        }
-
-        $decoded = json_decode((string) file_get_contents($path), true);
-        if (!is_array($decoded)) {
-            throw new RuntimeException('State file must be a JSON object: ' . $path);
-        }
-
-        $state = $decoded + self::defaultState();
-        if (!isset($state['usage']) || !is_array($state['usage'])) {
-            $state['usage'] = [];
-        }
-
-        return new self($state, $path);
+        return new self(self::readState($path), $path);
     }
 
     public function sessionAccount(string $sessionKey): ?string
     {
+        $this->reload();
         $value = $this->state['sessions'][$sessionKey] ?? null;
 
         return is_string($value) && $value !== '' ? $value : null;
@@ -60,12 +47,14 @@ final class StateStore
 
     public function bindSession(string $sessionKey, string $accountId): void
     {
-        $this->state['sessions'][$sessionKey] = $accountId;
-        $this->save();
+        $this->update(function (array &$state) use ($sessionKey, $accountId): void {
+            $state['sessions'][$sessionKey] = $accountId;
+        });
     }
 
     public function cooldownUntil(string $accountId): int
     {
+        $this->reload();
         $value = $this->state['accounts'][$accountId]['cooldown_until'] ?? 0;
 
         return is_int($value) ? $value : 0;
@@ -73,12 +62,14 @@ final class StateStore
 
     public function setCooldownUntil(string $accountId, int $timestamp): void
     {
-        $this->state['accounts'][$accountId]['cooldown_until'] = $timestamp;
-        $this->save();
+        $this->update(function (array &$state) use ($accountId, $timestamp): void {
+            $state['accounts'][$accountId]['cooldown_until'] = $timestamp;
+        });
     }
 
     public function cursor(): int
     {
+        $this->reload();
         $cursor = $this->state['cursor'] ?? 0;
 
         return is_int($cursor) ? $cursor : 0;
@@ -86,8 +77,9 @@ final class StateStore
 
     public function setCursor(int $cursor): void
     {
-        $this->state['cursor'] = max(0, $cursor);
-        $this->save();
+        $this->update(function (array &$state) use ($cursor): void {
+            $state['cursor'] = max(0, $cursor);
+        });
     }
 
     /**
@@ -95,6 +87,7 @@ final class StateStore
      */
     public function allAccountUsage(): array
     {
+        $this->reload();
         if (!isset($this->state['usage']) || !is_array($this->state['usage'])) {
             return [];
         }
@@ -122,24 +115,106 @@ final class StateStore
 
     public function setAccountUsage(string $accountId, CachedAccountUsage $usage): void
     {
-        if (!isset($this->state['usage']) || !is_array($this->state['usage'])) {
-            $this->state['usage'] = [];
-        }
+        $this->update(function (array &$state) use ($accountId, $usage): void {
+            if (!isset($state['usage']) || !is_array($state['usage'])) {
+                $state['usage'] = [];
+            }
 
-        $this->state['usage'][$accountId] = $usage->toArray();
-        $this->save();
+            $state['usage'][$accountId] = $usage->toArray();
+        });
     }
 
     public function setAccountUsageError(string $accountId, string $error, int $checkedAt): void
     {
-        $current = $this->accountUsage($accountId);
-        $updated = $current?->withError($error, $checkedAt)
-            ?? new CachedAccountUsage('', $checkedAt, $error, null, null);
-
-        $this->setAccountUsage($accountId, $updated);
+        $this->update(function (array &$state) use ($accountId, $error, $checkedAt): void {
+            $current = isset($state['usage'][$accountId]) && is_array($state['usage'][$accountId])
+                ? CachedAccountUsage::fromArray($state['usage'][$accountId])
+                : null;
+            $updated = $current?->withError($error, $checkedAt)
+                ?? new CachedAccountUsage('', $checkedAt, $error, null, null);
+            if (!isset($state['usage']) || !is_array($state['usage'])) {
+                $state['usage'] = [];
+            }
+            $state['usage'][$accountId] = $updated->toArray();
+        });
     }
 
-    private function save(): void
+    /** @return array<string,mixed> */
+    private static function readState(string $path): array
+    {
+        if (!is_file($path)) {
+            return self::defaultState();
+        }
+
+        $decoded = json_decode((string) file_get_contents($path), true);
+        if (!is_array($decoded)) {
+            throw new RuntimeException('State file must be a JSON object: ' . $path);
+        }
+
+        return self::normalizeState($decoded);
+    }
+
+    /** @param array<string,mixed> $state */
+    private static function normalizeState(array $state): array
+    {
+        $state += self::defaultState();
+        foreach (['accounts', 'sessions', 'usage'] as $key) {
+            if (!isset($state[$key]) || !is_array($state[$key])) {
+                $state[$key] = [];
+            }
+        }
+        if (!is_int($state['cursor'] ?? null)) {
+            $state['cursor'] = 0;
+        }
+
+        return $state;
+    }
+
+    private function reload(): void
+    {
+        if ($this->path === null) {
+            return;
+        }
+
+        $this->state = self::readState($this->path);
+    }
+
+    /**
+     * @param callable(array<string,mixed>):void $mutator
+     */
+    private function update(callable $mutator): void
+    {
+        if ($this->path === null) {
+            $mutator($this->state);
+            return;
+        }
+
+        $this->ensureStateDirectory();
+        $lockPath = $this->path . '.lock';
+        $lock = fopen($lockPath, 'c');
+        if (!is_resource($lock)) {
+            throw new RuntimeException('Failed to open state lock file: ' . $lockPath);
+        }
+
+        $locked = false;
+        try {
+            if (!flock($lock, LOCK_EX)) {
+                throw new RuntimeException('Failed to lock state file: ' . $lockPath);
+            }
+            $locked = true;
+            chmod($lockPath, 0600);
+            $this->state = self::readState($this->path);
+            $mutator($this->state);
+            $this->writeState();
+        } finally {
+            if ($locked) {
+                flock($lock, LOCK_UN);
+            }
+            fclose($lock);
+        }
+    }
+
+    private function ensureStateDirectory(): void
     {
         if ($this->path === null) {
             return;
@@ -149,10 +224,23 @@ final class StateStore
         if (!is_dir($dir) && !mkdir($dir, 0700, true) && !is_dir($dir)) {
             throw new RuntimeException('Failed to create state directory: ' . $dir);
         }
+    }
+
+    private function writeState(): void
+    {
+        if ($this->path === null) {
+            return;
+        }
 
         $json = json_encode($this->state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-        if (file_put_contents($this->path, $json, LOCK_EX) === false) {
-            throw new RuntimeException('Failed to write state file: ' . $this->path);
+        $tmpPath = $this->path . '.tmp.' . getmypid() . '.' . bin2hex(random_bytes(4));
+        if (file_put_contents($tmpPath, $json, LOCK_EX) === false) {
+            throw new RuntimeException('Failed to write state file: ' . $tmpPath);
+        }
+        chmod($tmpPath, 0600);
+        if (!rename($tmpPath, $this->path)) {
+            @unlink($tmpPath);
+            throw new RuntimeException('Failed to replace state file: ' . $this->path);
         }
         chmod($this->path, 0600);
     }

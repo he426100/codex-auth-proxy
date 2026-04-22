@@ -92,6 +92,56 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
+    public function testRetriesAcrossAllAvailableAccountsBeforeReturningQuotaFailure(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-retry-all');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+        $this->writeJson($accountsDir . '/beta.account.json', $this->accountFixture('beta'));
+        $this->writeJson($accountsDir . '/gamma.account.json', $this->accountFixture('gamma'));
+
+        $captureFile = $home . '/upstream-requests.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-quota-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $http = new GuzzleClient(['http_errors' => false, 'timeout' => 5]);
+            $response = $http->post("http://127.0.0.1:{$proxyPort}/v1/responses/compact", [
+                'headers' => [
+                    'Content-Type' => 'application/json',
+                    'X-Request-Id' => 'integration-retry-all',
+                    'X-Codex-Turn-State' => 'turn-retry-all',
+                ],
+                'body' => '{"input":"hello"}',
+            ]);
+
+            self::assertSame(200, $response->getStatusCode());
+            self::assertSame('{"id":"resp_3","object":"response.compaction"}', (string) $response->getBody());
+
+            $attempts = $this->waitForJsonLines($captureFile, 3);
+            self::assertSame(['acct-alpha', 'acct-beta', 'acct-gamma'], array_column($attempts, 'account_id'));
+
+            $state = $this->waitForJsonFile($home . '/state.json');
+            self::assertSame('acct-gamma', $state['sessions']['x-codex-turn-state:turn-retry-all']);
+            self::assertGreaterThan(time(), $state['accounts']['acct-alpha']['cooldown_until']);
+            self::assertGreaterThan(time(), $state['accounts']['acct-beta']['cooldown_until']);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
     public function testTracesWebSocketUpstreamErrorFrame(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {
@@ -193,6 +243,31 @@ final class CodexProxyServerIntegrationTest extends TestCase
         } while (microtime(true) < $deadline);
 
         self::fail('Timed out waiting for JSON file: ' . $path);
+    }
+
+    /**
+     * @return list<array<string,mixed>>
+     */
+    private function waitForJsonLines(string $path, int $count): array
+    {
+        $deadline = microtime(true) + 5.0;
+        do {
+            if (is_file($path)) {
+                $rows = [];
+                foreach (file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+                    $data = json_decode($line, true, flags: JSON_THROW_ON_ERROR);
+                    if (is_array($data)) {
+                        $rows[] = $data;
+                    }
+                }
+                if (count($rows) >= $count) {
+                    return $rows;
+                }
+            }
+            usleep(50_000);
+        } while (microtime(true) < $deadline);
+
+        self::fail('Timed out waiting for JSON lines: ' . $path);
     }
 
     /** @return array<string,mixed> */

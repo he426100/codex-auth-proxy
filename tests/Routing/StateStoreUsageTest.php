@@ -57,6 +57,31 @@ final class StateStoreUsageTest extends TestCase
         self::assertNull($reloaded->error);
     }
 
+    public function testWritesMergeExternalStateChangesFromOtherProcesses(): void
+    {
+        $dir = $this->tempDir('cap-state');
+        $path = $dir . '/state.json';
+        $serveState = StateStore::file($path);
+        $serveState->bindSession('thread-1', 'acct-alpha');
+
+        $usage = new CachedAccountUsage(
+            'plus',
+            1234567890,
+            null,
+            new CachedRateLimitWindow(93.0, 7.0, 300, 1776756600),
+            new CachedRateLimitWindow(15.0, 85.0, 10080, 1777338600),
+        );
+        StateStore::file($path)->setAccountUsage('acct-alpha', $usage);
+
+        $serveState->bindSession('thread-2', 'acct-beta');
+        $reloaded = StateStore::file($path);
+
+        self::assertSame('acct-alpha', $reloaded->sessionAccount('thread-1'));
+        self::assertSame('acct-beta', $reloaded->sessionAccount('thread-2'));
+        self::assertNotNull($reloaded->accountUsage('acct-alpha'));
+        self::assertSame(7.0, $reloaded->accountUsage('acct-alpha')?->primary?->leftPercent);
+    }
+
     public function testRestoresHistoricalWindowShapeWithoutLeftPercentOrWindowMinutes(): void
     {
         $dir = $this->tempDir('cap-state');
