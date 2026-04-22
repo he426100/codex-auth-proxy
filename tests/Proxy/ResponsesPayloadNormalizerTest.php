@@ -92,6 +92,41 @@ JSON;
         self::assertSame($payload, (new ResponsesPayloadNormalizer())->normalizeWebSocket($payload));
     }
 
+    public function testReportsNoMutationsForAlreadyCompatiblePayload(): void
+    {
+        $payload = '{"input":[{"type":"message","role":"user","content":[]}],"stream":false}';
+
+        $result = (new ResponsesPayloadNormalizer())->normalizeHttpWithReport($payload);
+
+        self::assertSame($payload, $result->payload());
+        self::assertSame([], $result->mutations());
+    }
+
+    public function testReportsHttpCompatibilityMutations(): void
+    {
+        $payload = '{"instructions":null,"input":"hello","tools":[{"type":"function","parameters":[]}]}';
+
+        $result = (new ResponsesPayloadNormalizer())->normalizeHttpWithReport($payload);
+
+        self::assertSame([
+            'http.instructions.null_to_empty',
+            'http.input.string_to_message',
+            'parameters.empty_array_to_object',
+        ], $result->mutations());
+    }
+
+    public function testReportsWebSocketCompatibilityMutations(): void
+    {
+        $payload = '{"type":"response.append","tools":[{"type":"function","parameters":[]}]}';
+
+        $result = (new ResponsesPayloadNormalizer())->normalizeWebSocketWithReport($payload);
+
+        self::assertSame([
+            'websocket.type.response_create',
+            'parameters.empty_array_to_object',
+        ], $result->mutations());
+    }
+
     public function testHttpAppliesSafeCodexCompatibilityNormalizations(): void
     {
         $payload = json_encode([

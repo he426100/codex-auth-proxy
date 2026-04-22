@@ -28,4 +28,12 @@ final class ResponsesWebSocketNormalizerTest extends TestCase
     {
         self::assertSame('not-json', (new ResponsesWebSocketNormalizer())->normalize('not-json'));
     }
+
+    public function testReportsWebSocketMutations(): void
+    {
+        $result = (new ResponsesWebSocketNormalizer())->normalizeWithReport('{"type":"response.append"}');
+
+        self::assertSame('{"type":"response.create"}', $result->payload());
+        self::assertSame(['websocket.type.response_create'], $result->mutations());
+    }
 }

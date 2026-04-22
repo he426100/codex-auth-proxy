@@ -56,6 +56,9 @@ final class AppConfigLoader
             'trace_dir' => $this->stringValue($overrides['trace_dir'] ?? null)
                 ?? $this->stringValue($defaults['trace_dir'] ?? null)
                 ?? $root . '/traces',
+            'trace_mutations' => $this->boolValue($overrides['trace_mutations'] ?? null)
+                ?? $this->boolValue($defaults['trace_mutations'] ?? null)
+                ?? true,
             'http_proxy' => $this->stringValue($overrides['http_proxy'] ?? null)
                 ?? $this->stringValue($defaults['http_proxy'] ?? null),
             'https_proxy' => $this->stringValue($overrides['https_proxy'] ?? null)
@@ -79,6 +82,7 @@ final class AppConfigLoader
          *   codex_user_agent:string,
          *   codex_beta_features:string,
          *   trace_dir:string,
+         *   trace_mutations:bool,
          *   http_proxy:?string,
          *   https_proxy:?string,
          *   no_proxy:string
@@ -100,6 +104,7 @@ final class AppConfigLoader
             $processed['codex_user_agent'],
             $processed['codex_beta_features'],
             $processed['trace_dir'],
+            $processed['trace_mutations'],
             $processed['http_proxy'],
             $processed['https_proxy'],
             $processed['no_proxy'],
@@ -138,5 +143,24 @@ final class AppConfigLoader
         }
 
         return null;
+    }
+
+    private function boolValue(mixed $value): ?bool
+    {
+        if (is_bool($value)) {
+            return $value;
+        }
+        if (is_int($value)) {
+            return $value !== 0;
+        }
+        if (!is_string($value) || trim($value) === '') {
+            return null;
+        }
+
+        return match (strtolower(trim($value))) {
+            '1', 'true', 'yes', 'on' => true,
+            '0', 'false', 'no', 'off' => false,
+            default => null,
+        };
     }
 }

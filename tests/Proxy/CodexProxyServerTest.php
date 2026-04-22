@@ -156,6 +156,62 @@ final class CodexProxyServerTest extends TestCase
         self::assertSame('quota', $payload['classification']);
     }
 
+    public function testRecordsTraceForPayloadMutations(): void
+    {
+        $traceDir = $this->tempDir('proxy-mutation-trace');
+        $server = new CodexProxyServer(
+            host: '127.0.0.1',
+            port: 1456,
+            accountsDir: '/tmp/accounts',
+            stateFile: '/tmp/state.json',
+            defaultCooldownSeconds: 18000,
+            requestTraceLogger: new RequestTraceLogger($traceDir),
+        );
+
+        $method = new ReflectionMethod(CodexProxyServer::class, 'tracePayloadMutations');
+        $method->invoke(
+            $server,
+            'req-mutation',
+            'http',
+            new SessionKey('session-mutation'),
+            ['http.input.string_to_message'],
+        );
+
+        $files = glob($traceDir . '/*.json') ?: [];
+        self::assertCount(1, $files);
+        $payload = json_decode((string) file_get_contents($files[0]), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame('req-mutation', $payload['request_id']);
+        self::assertSame('http', $payload['transport']);
+        self::assertSame('request_normalized', $payload['phase']);
+        self::assertSame('session-mutation', $payload['session']);
+        self::assertSame(['http.input.string_to_message'], $payload['mutations']);
+    }
+
+    public function testSkipsTraceForPayloadMutationsWhenDisabled(): void
+    {
+        $traceDir = $this->tempDir('proxy-mutation-trace-disabled');
+        $server = new CodexProxyServer(
+            host: '127.0.0.1',
+            port: 1456,
+            accountsDir: '/tmp/accounts',
+            stateFile: '/tmp/state.json',
+            defaultCooldownSeconds: 18000,
+            requestTraceLogger: new RequestTraceLogger($traceDir),
+            traceMutations: false,
+        );
+
+        $method = new ReflectionMethod(CodexProxyServer::class, 'tracePayloadMutations');
+        $method->invoke(
+            $server,
+            'req-mutation-disabled',
+            'http',
+            new SessionKey('session-mutation-disabled'),
+            ['http.input.string_to_message'],
+        );
+
+        self::assertSame([], glob($traceDir . '/*.json') ?: []);
+    }
+
     public function testBuildsStructuredProxyUnavailablePayload(): void
     {
         $server = new CodexProxyServer(
@@ -230,6 +286,7 @@ final class CodexProxyServerTest extends TestCase
             codexUserAgent: 'ua',
             codexBetaFeatures: 'multi_agent',
             traceDir: '/tmp/traces',
+            traceMutations: true,
             httpProxy: $httpProxy,
             httpsProxy: $httpsProxy,
             noProxy: $noProxy,

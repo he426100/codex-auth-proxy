@@ -142,6 +142,7 @@ final class OutboundProxyConfigTest extends TestCase
             codexUserAgent: 'ua',
             codexBetaFeatures: 'multi_agent',
             traceDir: '/tmp/traces',
+            traceMutations: true,
             httpProxy: $httpProxy,
             httpsProxy: $httpsProxy,
             noProxy: $noProxy,

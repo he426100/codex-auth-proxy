@@ -27,6 +27,7 @@ return [
     'codex_user_agent' => env('CODEX_AUTH_PROXY_CODEX_USER_AGENT', 'codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0'),
     'codex_beta_features' => env('CODEX_AUTH_PROXY_CODEX_BETA_FEATURES', 'multi_agent'),
     'trace_dir' => env('CODEX_AUTH_PROXY_TRACE_DIR'),
+    'trace_mutations' => env('CODEX_AUTH_PROXY_TRACE_MUTATIONS', true),
     'http_proxy' => env('CODEX_AUTH_PROXY_HTTP_PROXY'),
     'https_proxy' => env('CODEX_AUTH_PROXY_HTTPS_PROXY'),
     'no_proxy' => env('CODEX_AUTH_PROXY_NO_PROXY', 'localhost,127.0.0.1,::1'),

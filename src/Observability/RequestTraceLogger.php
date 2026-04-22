@@ -26,6 +26,12 @@ final class RequestTraceLogger
     /** @param array<string,mixed> $event */
     public function error(array $event): void
     {
+        $this->event($event);
+    }
+
+    /** @param array<string,mixed> $event */
+    public function event(array $event): void
+    {
         $payload = $this->payload($event);
         $this->ensureTraceDir();
 
@@ -54,6 +60,12 @@ final class RequestTraceLogger
 
         if (isset($event['message'])) {
             $payload['message'] = $this->truncate($this->sanitizeMessage((string) $event['message']));
+        }
+        if (isset($event['mutations']) && is_array($event['mutations'])) {
+            $payload['mutations'] = array_values(array_filter(
+                $event['mutations'],
+                static fn (mixed $mutation): bool => is_string($mutation) && $mutation !== '',
+            ));
         }
 
         return $payload;

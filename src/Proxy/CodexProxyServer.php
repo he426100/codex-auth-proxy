@@ -44,6 +44,7 @@ final class CodexProxyServer
         private readonly string $codexBetaFeatures = 'multi_agent',
         private readonly ?RequestTraceLogger $requestTraceLogger = null,
         private readonly RequestIdFactory $requestIdFactory = new RequestIdFactory(),
+        private readonly bool $traceMutations = true,
     ) {
         $this->activeLogger = $logger ?? new NullLogger();
         $this->activeTokenRefresher = $tokenRefresher ?? new TokenRefresher(proxy: $outboundProxyConfig?->guzzleProxy() ?? []);
@@ -184,7 +185,9 @@ final class CodexProxyServer
         $rawBody = $request->rawContent() ?: '';
         $requestId = $this->requestIdFactory->fromHeaders($request->header ?? []);
         $sessionKey = $extractor->extract($request->header ?? [], $rawBody);
-        $body = $payloadNormalizer->normalizeHttp($rawBody);
+        $normalizedBody = $payloadNormalizer->normalizeHttpWithReport($rawBody);
+        $body = $normalizedBody->payload();
+        $this->tracePayloadMutations($requestId, 'http', $sessionKey, $normalizedBody->mutations());
         try {
             $account = $this->freshAccount($this->accountForSessionWithRecovery($sessionKey, $scheduler, $repository), $repository, $scheduler);
             $authRefreshAttempts = [];
@@ -257,9 +260,11 @@ final class CodexProxyServer
 
         $client = $websocketClients[$fd] ?? null;
         $rawPayload = (string) $frame->data;
-        $payload = $normalizer->normalize($rawPayload);
         $requestId = $this->requestIdFactory->fromHeaders($request->header ?? []);
         $sessionKey = $extractor->extract($request->header ?? [], $rawPayload);
+        $normalizedPayload = $normalizer->normalizeWithReport($rawPayload);
+        $payload = $normalizedPayload->payload();
+        $this->tracePayloadMutations($requestId, 'websocket', $sessionKey, $normalizedPayload->mutations());
         $retryTracker->beginPayload($fd, $payload);
         $websocketLastPayloads[$fd] = [
             'payload' => $payload,
@@ -680,6 +685,29 @@ final class CodexProxyServer
         $this->traceUpstreamError($requestId, 'websocket', 'upstream_error', $sessionKey, $account, 200, $errorBody, $classification->type());
 
         return $classification;
+    }
+
+    /** @param list<string> $mutations */
+    private function tracePayloadMutations(string $requestId, string $transport, SessionKey $sessionKey, array $mutations): void
+    {
+        if (!$this->traceMutations || $this->requestTraceLogger === null || $mutations === []) {
+            return;
+        }
+
+        try {
+            $this->requestTraceLogger->event([
+                'request_id' => $requestId,
+                'transport' => $transport,
+                'phase' => 'request_normalized',
+                'session' => $sessionKey->primary,
+                'mutations' => $mutations,
+            ]);
+        } catch (Throwable $throwable) {
+            $this->activeLogger->warning('Failed to write request mutation trace', [
+                'request_id' => $requestId,
+                'error' => $throwable->getMessage(),
+            ]);
+        }
     }
 
     private function freshAccount(CodexAccount $account, AccountRepository $repository, Scheduler $scheduler): CodexAccount

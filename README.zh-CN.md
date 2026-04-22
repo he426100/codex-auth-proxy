@@ -220,6 +220,7 @@ CODEX_AUTH_PROXY_LOG_LEVEL=warning
 CODEX_AUTH_PROXY_CODEX_USER_AGENT="codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0"
 CODEX_AUTH_PROXY_CODEX_BETA_FEATURES=multi_agent
 CODEX_AUTH_PROXY_TRACE_DIR=/home/me/.config/codex-auth-proxy/traces
+CODEX_AUTH_PROXY_TRACE_MUTATIONS=true
 CODEX_AUTH_PROXY_HTTP_PROXY=http://127.0.0.1:7890
 CODEX_AUTH_PROXY_HTTPS_PROXY=http://127.0.0.1:7890
 CODEX_AUTH_PROXY_NO_PROXY=localhost,127.0.0.1,::1
@@ -231,7 +232,7 @@ CODEX_AUTH_PROXY_NO_PROXY=localhost,127.0.0.1,::1
 
 `CODEX_AUTH_PROXY_NO_PROXY` 支持精确 host/IP、`localhost`、loopback 地址、带端口的 host、`*`，以及 `openai.com` 或 `.openai.com` 形式的域名后缀匹配。
 
-当上游 HTTP/WebSocket 出错时，`serve` 会向 `CODEX_AUTH_PROXY_TRACE_DIR` 写入脱敏 JSON trace。trace 文件包含 request id、传输类型、阶段、session key、账号名、状态码和脱敏错误摘要；不会保存完整 OAuth token 或原始 authorization header。
+当上游 HTTP/WebSocket 出错时，`serve` 会向 `CODEX_AUTH_PROXY_TRACE_DIR` 写入脱敏 JSON trace。`CODEX_AUTH_PROXY_TRACE_MUTATIONS=true` 时，代理执行 Codex 兼容改写也会写入 `request_normalized` trace，内容只包含 `parameters.empty_array_to_object` 这类 mutation 名称，不保存 prompt 内容。错误 trace 文件包含 request id、传输类型、阶段、session key、账号名、状态码和脱敏错误摘要；不会保存完整 OAuth token 或原始 authorization header。
 
 如果 `serve` 日志里出现 upstream WebSocket 或 HTTPS `status -1`，说明 Swoole client 没有拿到上游 HTTP 响应。当前网络不能直连 `chatgpt.com` 时，需要把 `CODEX_AUTH_PROXY_HTTPS_PROXY` 设置为支持的代理 URL，例如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:7890`。不要给 `serve` 配置 `https://` 代理 URL；Swoole 上游转发只支持 HTTP 和 SOCKS5 proxy 配置。
 

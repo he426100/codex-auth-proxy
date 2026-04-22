@@ -10,65 +10,78 @@ final class ResponsesPayloadNormalizer
 {
     public function normalizeHttp(string $payload): string
     {
-        return $this->normalize($payload, false);
+        return $this->normalizeHttpWithReport($payload)->payload();
     }
 
     public function normalizeWebSocket(string $payload): string
     {
+        return $this->normalizeWebSocketWithReport($payload)->payload();
+    }
+
+    public function normalizeHttpWithReport(string $payload): NormalizedPayload
+    {
+        return $this->normalize($payload, false);
+    }
+
+    public function normalizeWebSocketWithReport(string $payload): NormalizedPayload
+    {
         return $this->normalize($payload, true);
     }
 
-    private function normalize(string $payload, bool $websocket): string
+    private function normalize(string $payload, bool $websocket): NormalizedPayload
     {
         try {
             $decoded = json_decode($payload, false, flags: JSON_THROW_ON_ERROR);
         } catch (\JsonException) {
-            return $payload;
+            return new NormalizedPayload($payload, []);
         }
 
         if (!$decoded instanceof stdClass && !is_array($decoded)) {
-            return $payload;
+            return new NormalizedPayload($payload, []);
         }
 
-        $changed = false;
+        $mutations = [];
         if ($websocket && $decoded instanceof stdClass && ($decoded->type ?? null) !== 'response.create') {
             $decoded->type = 'response.create';
-            $changed = true;
+            $mutations[] = 'websocket.type.response_create';
         }
         if (!$websocket && $decoded instanceof stdClass) {
-            $changed = $this->normalizeHttpCompatibility($decoded) || $changed;
+            $this->normalizeHttpCompatibility($decoded, $mutations);
         }
 
-        $changed = $this->normalizeParameters($decoded) || $changed;
-        if (!$changed) {
-            return $payload;
+        $this->normalizeParameters($decoded, $mutations);
+        if ($mutations === []) {
+            return new NormalizedPayload($payload, []);
         }
 
-        return json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        return new NormalizedPayload(
+            json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+            array_values(array_unique($mutations)),
+        );
     }
 
-    private function normalizeHttpCompatibility(stdClass $payload): bool
+    /** @param list<string> $mutations */
+    private function normalizeHttpCompatibility(stdClass $payload, array &$mutations): void
     {
-        $changed = false;
         if (property_exists($payload, 'instructions') && $payload->instructions === null) {
             $payload->instructions = '';
-            $changed = true;
+            $mutations[] = 'http.instructions.null_to_empty';
         }
 
         if (property_exists($payload, 'input') && is_string($payload->input)) {
             $payload->input = [$this->messageInput($payload->input)];
-            $changed = true;
+            $mutations[] = 'http.input.string_to_message';
         }
         if (property_exists($payload, 'input') && is_array($payload->input)) {
             foreach ($payload->input as $item) {
                 if ($item instanceof stdClass && ($item->role ?? null) === 'system') {
                     $item->role = 'developer';
-                    $changed = true;
+                    $mutations[] = 'http.input.system_role_to_developer';
                 }
             }
         }
 
-        return $this->normalizeBuiltinTools($payload) || $changed;
+        $this->normalizeBuiltinTools($payload, $mutations);
     }
 
     private function messageInput(string $text): stdClass
@@ -85,68 +98,63 @@ final class ResponsesPayloadNormalizer
         ];
     }
 
-    private function normalizeBuiltinTools(stdClass $payload): bool
+    /** @param list<string> $mutations */
+    private function normalizeBuiltinTools(stdClass $payload, array &$mutations): void
     {
-        $changed = false;
         if (isset($payload->tools) && is_array($payload->tools)) {
             foreach ($payload->tools as $tool) {
-                $changed = $this->normalizeBuiltinTool($tool) || $changed;
+                $this->normalizeBuiltinTool($tool, $mutations);
             }
         }
 
         if (isset($payload->tool_choice) && $payload->tool_choice instanceof stdClass) {
-            $changed = $this->normalizeBuiltinTool($payload->tool_choice) || $changed;
+            $this->normalizeBuiltinTool($payload->tool_choice, $mutations);
             if (isset($payload->tool_choice->tools) && is_array($payload->tool_choice->tools)) {
                 foreach ($payload->tool_choice->tools as $tool) {
-                    $changed = $this->normalizeBuiltinTool($tool) || $changed;
+                    $this->normalizeBuiltinTool($tool, $mutations);
                 }
             }
         }
-
-        return $changed;
     }
 
-    private function normalizeBuiltinTool(mixed $tool): bool
+    /** @param list<string> $mutations */
+    private function normalizeBuiltinTool(mixed $tool, array &$mutations): void
     {
         if (!$tool instanceof stdClass || !isset($tool->type) || !is_string($tool->type)) {
-            return false;
+            return;
         }
 
         if (in_array($tool->type, ['web_search_preview', 'web_search_preview_2025_03_11'], true)) {
             $tool->type = 'web_search';
-            return true;
+            $mutations[] = 'tool.web_search_preview_to_web_search';
         }
-
-        return false;
     }
 
-    private function normalizeParameters(mixed &$value): bool
+    /** @param list<string> $mutations */
+    private function normalizeParameters(mixed &$value, array &$mutations): void
     {
-        $changed = false;
         if ($value instanceof stdClass) {
             foreach (get_object_vars($value) as $key => $item) {
                 if ($key === 'parameters' && is_array($item) && $item === []) {
                     $value->{$key} = new stdClass();
-                    $changed = true;
+                    $mutations[] = 'parameters.empty_array_to_object';
                     continue;
                 }
 
-                $changed = $this->normalizeParameters($item) || $changed;
+                $this->normalizeParameters($item, $mutations);
                 $value->{$key} = $item;
             }
 
-            return $changed;
+            return;
         }
 
         if (!is_array($value)) {
-            return false;
+            return;
         }
 
         foreach ($value as $key => $item) {
-            $changed = $this->normalizeParameters($item) || $changed;
+            $this->normalizeParameters($item, $mutations);
             $value[$key] = $item;
         }
-
-        return $changed;
     }
 }

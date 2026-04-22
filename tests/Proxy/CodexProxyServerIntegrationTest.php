@@ -176,7 +176,7 @@ final class CodexProxyServerIntegrationTest extends TestCase
             self::assertSame(502, $response->getStatusCode());
             self::assertStringContainsString('HTTP request failed', (string) $response->getBody());
 
-            $trace = $this->waitForTrace($home . '/traces');
+            $trace = $this->waitForTrace($home . '/traces', 'upstream_response');
             self::assertSame('http', $trace['transport']);
             self::assertSame('upstream_response', $trace['phase']);
             self::assertSame(502, $trace['status']);
@@ -571,7 +571,7 @@ final class CodexProxyServerIntegrationTest extends TestCase
             });
 
             self::assertStringContainsString('usage_limit_reached', (string) $payload);
-            $trace = $this->waitForTrace($home . '/traces');
+            $trace = $this->waitForTrace($home . '/traces', 'upstream_error');
             self::assertSame('websocket', $trace['transport']);
             self::assertSame('upstream_error', $trace['phase']);
             self::assertSame('alpha', $trace['account']);
@@ -1041,21 +1041,25 @@ final class CodexProxyServerIntegrationTest extends TestCase
     }
 
     /** @return array<string,mixed> */
-    private function waitForTrace(string $dir): array
+    private function waitForTrace(string $dir, ?string $phase = null): array
     {
         $deadline = microtime(true) + 5.0;
         do {
             $files = glob($dir . '/*.json') ?: [];
-            if ($files !== []) {
-                $data = json_decode((string) file_get_contents($files[0]), true, flags: JSON_THROW_ON_ERROR);
+            foreach ($files as $file) {
+                $data = json_decode((string) file_get_contents($file), true, flags: JSON_THROW_ON_ERROR);
                 if (is_array($data)) {
+                    if ($phase !== null && ($data['phase'] ?? null) !== $phase) {
+                        continue;
+                    }
+
                     return $data;
                 }
             }
             usleep(50_000);
         } while (microtime(true) < $deadline);
 
-        self::fail('Timed out waiting for trace in: ' . $dir);
+        self::fail('Timed out waiting for trace in: ' . $dir . ($phase !== null ? ' phase=' . $phase : ''));
     }
 
     /** @param list<string> $command */

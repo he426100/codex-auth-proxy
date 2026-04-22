@@ -49,6 +49,7 @@ final class ServeCommand extends ProxyCommand
             codexUserAgent: $config->codexUserAgent,
             codexBetaFeatures: $config->codexBetaFeatures,
             requestTraceLogger: new RequestTraceLogger($config->traceDir),
+            traceMutations: $config->traceMutations,
         ))->start();
 
         return self::SUCCESS;

@@ -82,4 +82,33 @@ final class RequestTraceLoggerTest extends TestCase
         self::assertStringNotContainsString('secret prompt', $payload['message']);
         self::assertStringNotContainsString('source code secret', $payload['message']);
     }
+
+    public function testWritesMutationTraceWithoutPromptContent(): void
+    {
+        $dir = $this->tempDir('trace-mutations');
+        $logger = new RequestTraceLogger($dir);
+
+        $logger->event([
+            'request_id' => 'mutation-1',
+            'transport' => 'http',
+            'phase' => 'request_normalized',
+            'session' => 'session-a',
+            'mutations' => [
+                'http.input.string_to_message',
+                'parameters.empty_array_to_object',
+            ],
+            'message' => '{"input":"secret prompt"}',
+        ]);
+
+        $files = glob($dir . '/*.json') ?: [];
+        self::assertCount(1, $files);
+
+        $payload = json_decode((string) file_get_contents($files[0]), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame('request_normalized', $payload['phase']);
+        self::assertSame([
+            'http.input.string_to_message',
+            'parameters.empty_array_to_object',
+        ], $payload['mutations']);
+        self::assertStringNotContainsString('secret prompt', $payload['message']);
+    }
 }
