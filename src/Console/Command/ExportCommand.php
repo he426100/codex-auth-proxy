@@ -67,8 +67,10 @@ final class ExportCommand extends ProxyCommand
     {
         $sourcePath = $config->home . '/.codex/config.toml';
         $source = is_file($sourcePath) ? (string) file_get_contents($sourcePath) : '';
-        $line = 'openai_base_url = "http://' . $config->host . ':' . $config->port . '/v1"';
-        $content = $this->withLeadingOpenAiBaseUrl($source, $line);
+        $content = $this->withLeadingRootAssignments($source, [
+            'model_provider' => '"openai"',
+            'openai_base_url' => '"http://' . $config->host . ':' . $config->port . '/v1"',
+        ]);
         $path = $this->proxyPath($config, 'config.toml');
         $this->writeFile($path, $content);
 
@@ -84,11 +86,17 @@ final class ExportCommand extends ProxyCommand
         return $path;
     }
 
-    private function withLeadingOpenAiBaseUrl(string $source, string $line): string
+    /** @param array<string,string> $assignments */
+    private function withLeadingRootAssignments(string $source, array $assignments): string
     {
         $normalized = str_replace(["\r\n", "\r"], "\n", $source);
         if ($normalized === '') {
-            return $line . "\n";
+            $content = [];
+            foreach ($assignments as $key => $value) {
+                $content[] = $key . ' = ' . $value;
+            }
+
+            return implode("\n", $content) . "\n";
         }
 
         $lines = explode("\n", str_ends_with($normalized, "\n") ? substr($normalized, 0, -1) : $normalized);
@@ -101,31 +109,47 @@ final class ExportCommand extends ProxyCommand
         }
 
         $root = [];
-        $found = false;
+        $remaining = array_fill_keys(array_keys($assignments), true);
+        $insertAt = null;
         foreach (array_slice($lines, 0, $tableIndex) as $text) {
-            if (preg_match('/^\s*openai_base_url\s*=/', $text) === 1) {
-                if (!$found) {
-                    $root[] = $line;
-                    $found = true;
+            $matched = false;
+            foreach ($assignments as $key => $value) {
+                if (preg_match('/^\s*' . preg_quote($key, '/') . '\s*=/', $text) === 1) {
+                    if ($insertAt === null) {
+                        $insertAt = count($root);
+                    }
+                    if ($remaining[$key] === true) {
+                        $remaining[$key] = false;
+                    }
+                    $matched = true;
+                    break;
                 }
+            }
+            if ($matched) {
                 continue;
             }
             $root[] = $text;
         }
 
         $tail = array_slice($lines, $tableIndex);
-        if (!$found) {
+        if ($insertAt !== null || in_array(true, $remaining, true)) {
+            $insertLines = [];
+            foreach ($assignments as $key => $value) {
+                if (($remaining[$key] ?? false) === true || $insertAt !== null) {
+                    $insertLines[] = $key . ' = ' . $value;
+                }
+            }
             if ($root === []) {
-                $root[] = $line;
+                array_push($root, ...$insertLines);
                 if ($tail !== []) {
                     $root[] = '';
                 }
             } else {
-                $insertAt = count($root);
-                while ($insertAt > 0 && trim($root[$insertAt - 1]) === '') {
-                    $insertAt--;
+                $position = $insertAt ?? count($root);
+                while ($position > 0 && trim($root[$position - 1]) === '') {
+                    $position--;
                 }
-                array_splice($root, $insertAt, 0, [$line]);
+                array_splice($root, $position, 0, $insertLines);
             }
         }
 

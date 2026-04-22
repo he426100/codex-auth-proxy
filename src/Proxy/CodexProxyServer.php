@@ -270,23 +270,18 @@ final class CodexProxyServer
             $account = null;
             $authRefreshAttempts = [];
             try {
-                while ($client === null) {
-                    $account ??= $this->freshAccount($this->accountForSessionWithRecovery($sessionKey, $scheduler, $repository), $repository, $scheduler);
-                    try {
-                        $client = $this->openUpstreamWebSocket($request, $account, $headers);
-                    } catch (Throwable $throwable) {
-                        $refreshed = $this->refreshAccountAfterWebSocketUpgradeFailure($throwable, $classifier, $account, $repository, $scheduler, $authRefreshAttempts);
-                        if ($refreshed !== null) {
-                            $account = $refreshed;
-                            continue;
-                        }
-
-                        throw $throwable;
-                    }
-                }
-                if (!$client instanceof Client) {
-                    throw new RuntimeException('Upstream WebSocket connection was not established');
-                }
+                $account = $this->freshAccount($this->accountForSessionWithRecovery($sessionKey, $scheduler, $repository), $repository, $scheduler);
+                [$client, $account] = $this->openUpstreamWebSocketWithRecovery(
+                    $request,
+                    $account,
+                    $headers,
+                    $classifier,
+                    $sessionKey,
+                    $scheduler,
+                    $repository,
+                    $requestId,
+                    $authRefreshAttempts,
+                );
 
                 $websocketClients[$fd] = $client;
                 $this->startUpstreamWebSocketReader($server, $fd, $client, $request, $account, $websocketClients, $websocketLastPayloads, $scheduler, $classifier, $repository, $headers, $retryTracker);
@@ -326,7 +321,7 @@ final class CodexProxyServer
                 return strlen($chunk);
             },
         ]));
-        $requestUri = (string) ($request->server['request_uri'] ?? '/v1/responses');
+        $requestUri = $this->requestTarget($request, '/v1/responses');
         $client->setHeaders($headers->build($request->header ?? [], $account, $host, false, $this->httpAcceptFor($requestUri)));
         $client->setMethod(strtoupper((string) ($request->server['request_method'] ?? 'GET')));
         if ($body !== '') {
@@ -335,11 +330,13 @@ final class CodexProxyServer
 
         $path = $target->pathFor($requestUri);
         $client->execute($path);
-        $status = (int) ($client->statusCode ?: 502);
+        $statusCode = (int) $client->statusCode;
+        $status = $statusCode > 0 ? $statusCode : 502;
         $responseHeaders = is_array($client->headers ?? null) ? $client->headers : [];
         $buffer = $bodyBuffer->body();
-        if ($client->statusCode === -1) {
+        if ($statusCode <= 0) {
             $buffer = $this->upstreamClientError('HTTP request', $client);
+            $responseHeaders = ['Content-Type' => 'text/plain; charset=utf-8'];
         }
         foreach ($bodyBuffer->flush($responseHeaders) as $frame) {
             if (!$headersSent) {
@@ -352,7 +349,6 @@ final class CodexProxyServer
             $buffer = $client->body;
         }
         $incompleteStream = $this->httpAcceptFor($requestUri) === 'text/event-stream'
-            && $status > 0
             && $status < 400
             && !$bodyBuffer->completed();
         if ($bodyBuffer->streamed() && $incompleteStream) {
@@ -439,7 +435,7 @@ final class CodexProxyServer
         $client = new Client($host, $port, $ssl);
         $client->set($this->clientOptionsFor($host, ['timeout' => -1]));
         $client->setHeaders($headers->build($request->header ?? [], $account, $host, true));
-        $path = $target->pathFor((string) ($request->server['request_uri'] ?? '/v1/responses'));
+        $path = $target->pathFor($this->requestTarget($request, '/v1/responses'));
         if (!$client->upgrade($path) || (int) $client->statusCode !== 101) {
             $body = is_string($client->body ?? null) ? $client->body : '';
             $status = (int) ($client->statusCode ?: 502);
@@ -451,6 +447,63 @@ final class CodexProxyServer
         }
 
         return $client;
+    }
+
+    /**
+     * @param array<string,bool> $authRefreshAttempts
+     * @return array{0:Client,1:CodexAccount}
+     */
+    private function openUpstreamWebSocketWithRecovery(
+        Request $request,
+        CodexAccount $account,
+        UpstreamHeaderFactory $headers,
+        ErrorClassifier $classifier,
+        SessionKey $sessionKey,
+        Scheduler $scheduler,
+        AccountRepository $repository,
+        string $requestId,
+        array &$authRefreshAttempts,
+    ): array {
+        while (true) {
+            try {
+                return [$this->openUpstreamWebSocket($request, $account, $headers), $account];
+            } catch (Throwable $throwable) {
+                $refreshed = $this->refreshAccountAfterWebSocketUpgradeFailure($throwable, $classifier, $account, $repository, $scheduler, $authRefreshAttempts);
+                if ($refreshed !== null) {
+                    $account = $refreshed;
+                    continue;
+                }
+
+                $classification = $this->classifyWebSocketUpgradeFailure($throwable, $classifier);
+                if (!$classification instanceof ErrorClassification || !$classification->hardSwitch()) {
+                    throw $throwable;
+                }
+
+                $cooldownSeconds = max(1, $classification->cooldownUntil() - time());
+                $failure = $this->webSocketUpgradeFailureResult($throwable);
+                $this->activeLogger->warning('Switching Codex account after WebSocket upgrade hard failure', [
+                    'request_id' => $requestId,
+                    'session' => $sessionKey->primary,
+                    'type' => $classification->type(),
+                    'cooldown_seconds' => $cooldownSeconds,
+                ]);
+                $this->traceUpstreamError(
+                    $requestId,
+                    'websocket',
+                    'upstream_upgrade',
+                    $sessionKey,
+                    $account,
+                    $failure['status'] ?? 502,
+                    $failure['body'] ?? $throwable->getMessage(),
+                    $classification->type(),
+                );
+                $account = $this->freshAccount(
+                    $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository),
+                    $repository,
+                    $scheduler,
+                );
+            }
+        }
     }
 
     /**
@@ -498,6 +551,7 @@ final class CodexProxyServer
             $forwardedData = false;
             $completedSeen = false;
             $replacedClient = false;
+            $terminalErrorSent = false;
             while (true) {
                 $frame = $client->recv();
                 if ($frame === false || $frame === '') {
@@ -519,9 +573,7 @@ final class CodexProxyServer
                     $classification = $this->traceWebSocketStreamError($requestId, $sessionKey, $account, $errorBody, $classifier);
                     if ($classification->hardSwitch()) {
                         $cooldownSeconds = max(1, $classification->cooldownUntil() - time());
-                        $retryAttempted = false;
                         if ($lastPayload !== null && $retryTracker->claimRetry($fd, $lastPayload['payload'], $account->accountId(), $forwardedData)) {
-                            $retryAttempted = true;
                             $replacement = null;
                             try {
                                 $replacement = $this->freshAccount(
@@ -529,7 +581,18 @@ final class CodexProxyServer
                                     $repository,
                                     $scheduler,
                                 );
-                                $replacementClient = $this->openUpstreamWebSocket($request, $replacement, $headers);
+                                $authRefreshAttempts = [];
+                                [$replacementClient, $replacement] = $this->openUpstreamWebSocketWithRecovery(
+                                    $request,
+                                    $replacement,
+                                    $headers,
+                                    $classifier,
+                                    $lastPayload['sessionKey'],
+                                    $scheduler,
+                                    $repository,
+                                    $requestId,
+                                    $authRefreshAttempts,
+                                );
                                 $websocketClients[$fd] = $replacementClient;
                                 $this->startUpstreamWebSocketReader($server, $fd, $replacementClient, $request, $replacement, $websocketClients, $websocketLastPayloads, $scheduler, $classifier, $repository, $headers, $retryTracker);
                                 $replacementClient->push($lastPayload['payload'], $lastPayload['opcode']);
@@ -537,14 +600,19 @@ final class CodexProxyServer
                                 break;
                             } catch (Throwable $throwable) {
                                 $this->activeLogger->warning('Replacement WebSocket failed', ['error' => $throwable->getMessage()]);
-                                if ($replacement instanceof CodexAccount) {
-                                    $this->pushWebSocketError($server, $fd, 502, $throwable->getMessage());
+                                if (!$replacement instanceof CodexAccount) {
+                                    if ($server->isEstablished($fd)) {
+                                        $server->push($fd, $data, $opcode);
+                                        $forwardedData = true;
+                                    }
+                                    $terminalErrorSent = true;
                                     break;
                                 }
+                                $this->pushWebSocketError($server, $fd, 502, $throwable->getMessage());
+                                $terminalErrorSent = true;
+                                break;
                             }
-                        }
-
-                        if (!$retryAttempted) {
+                        } else {
                             try {
                                 $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository);
                             } catch (Throwable $throwable) {
@@ -552,6 +620,8 @@ final class CodexProxyServer
                             }
                         }
                     }
+
+                    $terminalErrorSent = true;
                 }
 
                 if ($server->isEstablished($fd)) {
@@ -566,6 +636,9 @@ final class CodexProxyServer
 
             $client->close();
             if (!$replacedClient && $server->isEstablished($fd)) {
+                if ($terminalErrorSent) {
+                    return;
+                }
                 if (!$completedSeen) {
                     $this->pushWebSocketError($server, $fd, 502, $this->incompleteStreamMessage());
                     return;
@@ -583,6 +656,17 @@ final class CodexProxyServer
         }
 
         return 'text/event-stream';
+    }
+
+    private function requestTarget(Request $request, string $defaultPath): string
+    {
+        $path = (string) (($request->server['request_uri'] ?? '') ?: $defaultPath);
+        $query = (string) ($request->server['query_string'] ?? '');
+        if ($query === '' || str_contains($path, '?')) {
+            return $path;
+        }
+
+        return $path . '?' . $query;
     }
 
     private function traceWebSocketStreamError(
@@ -654,12 +738,26 @@ final class CodexProxyServer
 
     private function classifyWebSocketUpgradeFailure(Throwable $throwable, ErrorClassifier $classifier): ?ErrorClassification
     {
+        $failure = $this->webSocketUpgradeFailureResult($throwable);
+        if ($failure === null) {
+            return null;
+        }
+
+        return $classifier->classify($failure['status'], $failure['body'], []);
+    }
+
+    /** @return array{status:int,body:string}|null */
+    private function webSocketUpgradeFailureResult(Throwable $throwable): ?array
+    {
         $message = $throwable->getMessage();
         if (!preg_match('/status\s+(-?\d+):\s*(.*)\z/s', $message, $matches)) {
             return null;
         }
 
-        return $classifier->classify((int) $matches[1], $matches[2], []);
+        return [
+            'status' => (int) $matches[1],
+            'body' => $matches[2],
+        ];
     }
 
     /**

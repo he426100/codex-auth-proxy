@@ -32,6 +32,7 @@ final class ApplicationTest extends TestCase
         $code = $tester->execute(['--port' => '1777']);
 
         self::assertSame(0, $code);
+        self::assertStringContainsString('model_provider = "openai"', $tester->getDisplay());
         self::assertStringContainsString('openai_base_url = "http://127.0.0.1:1777/v1"', $tester->getDisplay());
     }
 
@@ -143,7 +144,7 @@ final class ApplicationTest extends TestCase
 
         self::assertSame(0, $code);
         $exported = (string) file_get_contents($home . '/.config/codex-auth-proxy/config.toml');
-        self::assertStringStartsWith("openai_base_url = \"http://127.0.0.1:1777/v1\"\n", $exported);
+        self::assertStringStartsWith("model_provider = \"openai\"\nopenai_base_url = \"http://127.0.0.1:1777/v1\"\n", $exported);
         self::assertStringContainsString("[projects.demo]\ntrust_level = \"trusted\"", $exported);
     }
 
@@ -162,9 +163,30 @@ final class ApplicationTest extends TestCase
 
         self::assertSame(0, $code);
         $exported = (string) file_get_contents($home . '/.config/codex-auth-proxy/config.toml');
+        self::assertSame(1, substr_count($exported, 'model_provider'));
         self::assertSame(1, substr_count($exported, 'openai_base_url'));
-        self::assertStringContainsString("model = \"gpt-5.4\"\nopenai_base_url = \"http://127.0.0.1:1777/v1\"", $exported);
+        self::assertStringContainsString("model = \"gpt-5.4\"\nmodel_provider = \"openai\"\nopenai_base_url = \"http://127.0.0.1:1777/v1\"", $exported);
         self::assertStringContainsString("[projects.demo]\ntrust_level = \"trusted\"", $exported);
+    }
+
+    public function testExportsConfigTomlReplacesRootModelProviderWithBuiltinOpenai(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $codexConfig = $home . '/.codex/config.toml';
+        if (!mkdir(dirname($codexConfig), 0700, true) && !is_dir(dirname($codexConfig))) {
+            self::fail('Failed to create Codex config fixture');
+        }
+        file_put_contents($codexConfig, "model_provider = \"OpenAI\"\nopenai_base_url = \"https://icoe.pp.ua\"\n\n[model_providers.OpenAI]\nname = \"OpenAI\"\nbase_url = \"https://icoe.pp.ua\"\nrequires_openai_auth = true\n");
+
+        $application = new Application($home);
+        $tester = new CommandTester($application->find('export'));
+        $code = $tester->execute(['target' => 'config', '--port' => '1777']);
+
+        self::assertSame(0, $code);
+        $exported = (string) file_get_contents($home . '/.config/codex-auth-proxy/config.toml');
+        self::assertSame(1, substr_count($exported, 'model_provider = "openai"'));
+        self::assertStringNotContainsString("model_provider = \"OpenAI\"", $exported);
+        self::assertStringContainsString("[model_providers.OpenAI]\nname = \"OpenAI\"", $exported);
     }
 
     public function testExportsAuthJsonForSelectedProxyAccount(): void
@@ -217,7 +239,7 @@ final class ApplicationTest extends TestCase
         $code = $tester->execute(['target' => 'all', 'name' => 'alpha', '--apply' => true]);
 
         self::assertSame(0, $code);
-        self::assertStringStartsWith('openai_base_url = "http://127.0.0.1:1456/v1"', (string) file_get_contents($codexDir . '/config.toml'));
+        self::assertStringStartsWith("model_provider = \"openai\"\nopenai_base_url = \"http://127.0.0.1:1456/v1\"", (string) file_get_contents($codexDir . '/config.toml'));
         $codexAuth = json_decode((string) file_get_contents($codexDir . '/auth.json'), true, flags: JSON_THROW_ON_ERROR);
         $proxyAuth = json_decode((string) file_get_contents($home . '/.config/codex-auth-proxy/auth.json'), true, flags: JSON_THROW_ON_ERROR);
         self::assertSame($this->accountFixture('beta')['tokens']['access_token'], $codexAuth['tokens']['access_token']);

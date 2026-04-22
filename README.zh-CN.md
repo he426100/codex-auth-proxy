@@ -162,7 +162,7 @@ bin/codex-auth-proxy export all account-a
 ~/.config/codex-auth-proxy/auth.json
 ```
 
-`export config` 会读取 `~/.codex/config.toml`，只替换或插入文件开头的 `openai_base_url`，保留其他配置，例如 `projects`、`mcp_servers` 等。
+`export config` 会读取 `~/.codex/config.toml`，替换或插入根级 `model_provider = "openai"` 和 `openai_base_url`，保留其他配置，例如 `projects`、`mcp_servers` 等。
 
 如果要手动切换当前 Codex CLI 配置，使用 `--apply`：
 
@@ -189,6 +189,7 @@ bin/codex-auth-proxy config --port=1456
 把输出写入 `~/.codex/config.toml`。默认内容类似：
 
 ```toml
+model_provider = "openai"
 openai_base_url = "http://127.0.0.1:1456/v1"
 ```
 

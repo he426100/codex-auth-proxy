@@ -24,6 +24,7 @@ final class ConfigCommand extends ProxyCommand
     {
         $config = $this->appConfig($input);
         $output->writeln('# Add this to ~/.codex/config.toml');
+        $output->writeln('model_provider = "openai"');
         $output->writeln('openai_base_url = "http://' . $config->host . ':' . $config->port . '/v1"');
 
         return self::SUCCESS;

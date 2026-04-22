@@ -23,6 +23,8 @@ $server->set([
 ]);
 $server->on('request', static function (Request $request, Response $response) use ($captureFile): void {
     $path = (string) ($request->server['request_uri'] ?? '/');
+    $query = (string) ($request->server['query_string'] ?? '');
+    $target = $query !== '' ? $path . '?' . $query : $path;
     if ($path === '/health') {
         $response->end('ok');
         return;
@@ -30,6 +32,8 @@ $server->on('request', static function (Request $request, Response $response) us
 
     file_put_contents($captureFile, json_encode([
         'path' => $path,
+        'query' => $query,
+        'target' => $target,
         'accept' => (string) ($request->header['accept'] ?? ''),
         'authorization' => (string) ($request->header['authorization'] ?? ''),
         'body' => $request->rawContent(),

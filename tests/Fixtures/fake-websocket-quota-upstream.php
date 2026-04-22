@@ -16,7 +16,7 @@ if ($port <= 0 || $captureFile === '') {
     exit(2);
 }
 
-$accountsByFd = [];
+$connectionsByFd = [];
 $server = new Server('127.0.0.1', $port, SWOOLE_BASE);
 $server->set([
     'worker_num' => 1,
@@ -32,19 +32,37 @@ $server->on('request', static function (Request $request, Response $response): v
     $response->status(404);
     $response->end('not found');
 });
-$server->on('open', static function (Server $server, Request $request) use (&$accountsByFd): void {
+$server->on('open', static function (Server $server, Request $request) use (&$connectionsByFd): void {
     $fd = (int) ($request->fd ?? 0);
     if ($fd <= 0) {
         return;
     }
 
-    $accountsByFd[$fd] = (string) ($request->header['chatgpt-account-id'] ?? '');
+    $path = (string) ($request->server['request_uri'] ?? '/');
+    $query = (string) ($request->server['query_string'] ?? '');
+    $target = $query !== '' ? $path . '?' . $query : $path;
+
+    $connectionsByFd[$fd] = [
+        'account_id' => (string) ($request->header['chatgpt-account-id'] ?? ''),
+        'path' => $path,
+        'query' => $query,
+        'target' => $target,
+    ];
 });
-$server->on('message', static function (Server $server, Frame $frame) use (&$accountsByFd, $captureFile): void {
+$server->on('message', static function (Server $server, Frame $frame) use (&$connectionsByFd, $captureFile): void {
     $fd = (int) $frame->fd;
-    $accountId = $accountsByFd[$fd] ?? '';
+    $connection = $connectionsByFd[$fd] ?? [
+        'account_id' => '',
+        'path' => '/',
+        'query' => '',
+        'target' => '/',
+    ];
+    $accountId = (string) $connection['account_id'];
     file_put_contents($captureFile, json_encode([
         'account_id' => $accountId,
+        'path' => (string) $connection['path'],
+        'query' => (string) $connection['query'],
+        'target' => (string) $connection['target'],
         'payload' => (string) $frame->data,
     ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n", FILE_APPEND);
 
@@ -55,7 +73,7 @@ $server->on('message', static function (Server $server, Frame $frame) use (&$acc
 
     $server->push($fd, '{"type":"response.completed","response":{"id":"resp_ws_gamma"}}');
 });
-$server->on('close', static function (Server $server, int $fd) use (&$accountsByFd): void {
-    unset($accountsByFd[$fd]);
+$server->on('close', static function (Server $server, int $fd) use (&$connectionsByFd): void {
+    unset($connectionsByFd[$fd]);
 });
 $server->start();

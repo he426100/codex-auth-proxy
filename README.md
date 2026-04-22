@@ -71,7 +71,7 @@ Exports are written to:
 ~/.config/codex-auth-proxy/auth.json
 ```
 
-`export config` reads `~/.codex/config.toml`, replaces or prepends only the leading `openai_base_url`, and preserves the rest of the file, including project and MCP settings.
+`export config` reads `~/.codex/config.toml`, replaces or prepends the root `model_provider = "openai"` and `openai_base_url`, and preserves the rest of the file, including project and MCP settings.
 
 Use `--apply` to prompt before backing up and overwriting Codex CLI's active `config.toml`:
 
@@ -128,6 +128,13 @@ Print the Codex config snippet:
 
 ```bash
 bin/codex-auth-proxy config --port=1456
+```
+
+It prints:
+
+```toml
+model_provider = "openai"
+openai_base_url = "http://127.0.0.1:1456/v1"
 ```
 
 Start the proxy:
