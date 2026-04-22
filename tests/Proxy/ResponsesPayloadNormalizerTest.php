@@ -46,6 +46,52 @@ final class ResponsesPayloadNormalizerTest extends TestCase
         self::assertSame('not-json', (new ResponsesPayloadNormalizer())->normalizeHttp('not-json'));
     }
 
+    public function testHttpReturnsAlreadyCompatiblePayloadUnchanged(): void
+    {
+        $payload = <<<'JSON'
+{
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "hello"
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "unknown": true
+  },
+  "stream": false
+}
+JSON;
+
+        self::assertSame($payload, (new ResponsesPayloadNormalizer())->normalizeHttp($payload));
+    }
+
+    public function testWebSocketReturnsAlreadyCompatiblePayloadUnchanged(): void
+    {
+        $payload = <<<'JSON'
+{
+  "type": "response.create",
+  "tools": [
+    {
+      "name": "noop",
+      "parameters": {}
+    }
+  ],
+  "metadata": {
+    "unknown": true
+  }
+}
+JSON;
+
+        self::assertSame($payload, (new ResponsesPayloadNormalizer())->normalizeWebSocket($payload));
+    }
+
     public function testHttpAppliesSafeCodexCompatibilityNormalizations(): void
     {
         $payload = json_encode([
