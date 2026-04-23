@@ -205,7 +205,13 @@ final class AccountsCommand extends ProxyCommand
     {
         $accounts = $this->selectedAccounts($repository, $name);
         $outboundProxyConfig = OutboundProxyConfig::fromAppConfig($config);
-        $client = $this->usageClient ?? new CodexUsageClient(proxyEnv: $outboundProxyConfig->environment());
+        $client = $this->usageClient ?? new CodexUsageClient(
+            baseUrl: $config->usageBaseUrl,
+            proxyEnv: $outboundProxyConfig->environment(),
+            originator: $config->codexOriginator,
+            userAgent: $config->codexUserAgent,
+            residency: $config->codexResidency,
+        );
         $state = StateStore::file($config->stateFile);
         $results = [];
 

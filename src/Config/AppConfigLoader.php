@@ -51,6 +51,15 @@ final class AppConfigLoader
                 ?? $this->stringValue($defaults['codex_user_agent'] ?? null),
             'codex_beta_features' => $this->stringValue($overrides['codex_beta_features'] ?? null)
                 ?? $this->stringValue($defaults['codex_beta_features'] ?? null),
+            'codex_originator' => $this->stringValue($overrides['codex_originator'] ?? null)
+                ?? $this->stringValue($defaults['codex_originator'] ?? null),
+            'codex_residency' => $this->stringValue($overrides['codex_residency'] ?? null)
+                ?? $this->stringValue($defaults['codex_residency'] ?? null)
+                ?? '',
+            'usage_base_url' => $this->stringValue($overrides['usage_base_url'] ?? null)
+                ?? $this->stringValue($defaults['usage_base_url'] ?? null),
+            'usage_refresh_interval_seconds' => $this->intValue($overrides['usage_refresh_interval_seconds'] ?? null)
+                ?? $this->intValue($defaults['usage_refresh_interval_seconds'] ?? null),
             'trace_mutations' => $this->boolValue($overrides['trace_mutations'] ?? null)
                 ?? $this->boolValue($defaults['trace_mutations'] ?? null)
                 ?? true,
@@ -78,6 +87,10 @@ final class AppConfigLoader
          *   callback_timeout_seconds:int,
          *   codex_user_agent:string,
          *   codex_beta_features:string,
+         *   codex_originator:string,
+         *   codex_residency:string,
+         *   usage_base_url:string,
+         *   usage_refresh_interval_seconds:int,
          *   trace_mutations:bool,
          *   trace_timings:bool,
          *   http_proxy:?string,
@@ -99,6 +112,10 @@ final class AppConfigLoader
             $processed['callback_timeout_seconds'],
             $processed['codex_user_agent'],
             $processed['codex_beta_features'],
+            $processed['codex_originator'],
+            $processed['codex_residency'],
+            $processed['usage_base_url'],
+            $processed['usage_refresh_interval_seconds'],
             $processed['trace_mutations'],
             $processed['trace_timings'],
             $processed['http_proxy'],

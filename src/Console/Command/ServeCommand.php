@@ -52,9 +52,13 @@ final class ServeCommand extends ProxyCommand
             outboundProxyConfig: $outboundProxyConfig,
             codexUserAgent: $config->codexUserAgent,
             codexBetaFeatures: $config->codexBetaFeatures,
+            codexOriginator: $config->codexOriginator,
+            codexResidency: $config->codexResidency,
+            usageBaseUrl: $config->usageBaseUrl,
             requestTraceLogger: $this->requestTraceLogger,
             traceMutations: $config->traceMutations,
             traceTimings: $config->traceTimings,
+            usageRefreshIntervalSeconds: $config->usageRefreshIntervalSeconds,
         ))->start();
 
         return self::SUCCESS;

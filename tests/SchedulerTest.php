@@ -144,6 +144,59 @@ final class SchedulerTest extends TestCase
         self::assertSame('acct-alpha', $account->accountId());
     }
 
+    public function testDemotesLowQuotaAccountsForNewSessions(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha')),
+            $validator->validate($this->accountFixture('beta')),
+        ];
+        $state = StateStore::memory();
+        $state->setAccountUsage('acct-alpha', new CachedAccountUsage(
+            'plus',
+            1000,
+            null,
+            new CachedRateLimitWindow(97.0, 3.0, 300, 1300),
+            new CachedRateLimitWindow(40.0, 60.0, 3600, 4600),
+        ));
+        $state->setAccountUsage('acct-beta', new CachedAccountUsage(
+            'plus',
+            1000,
+            null,
+            new CachedRateLimitWindow(10.0, 90.0, 300, 1300),
+            new CachedRateLimitWindow(40.0, 60.0, 3600, 4600),
+        ));
+        $scheduler = new Scheduler($accounts, $state, static fn (): int => 1000);
+
+        $account = $scheduler->accountForSession('thread-low-quota');
+
+        self::assertSame('acct-beta', $account->accountId());
+    }
+
+    public function testStillSelectsLowQuotaAccountsWhenAllCandidatesAreLowQuota(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha')),
+            $validator->validate($this->accountFixture('beta')),
+        ];
+        $state = StateStore::memory();
+        foreach (['acct-alpha', 'acct-beta'] as $accountId) {
+            $state->setAccountUsage($accountId, new CachedAccountUsage(
+                'plus',
+                1000,
+                null,
+                new CachedRateLimitWindow(97.0, 3.0, 300, 1300),
+                new CachedRateLimitWindow(40.0, 60.0, 3600, 4600),
+            ));
+        }
+        $scheduler = new Scheduler($accounts, $state, static fn (): int => 1000);
+
+        $account = $scheduler->accountForSession('thread-all-low-quota');
+
+        self::assertSame('acct-alpha', $account->accountId());
+    }
+
     public function testDoesNotSkipExhaustedAccountsAfterRefreshError(): void
     {
         $validator = new AccountFileValidator();

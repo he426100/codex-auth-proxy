@@ -7,129 +7,133 @@ namespace CodexAuthProxy\Tests\Usage;
 use CodexAuthProxy\Account\AccountFileValidator;
 use CodexAuthProxy\Tests\TestCase;
 use CodexAuthProxy\Usage\CodexUsageClient;
+use GuzzleHttp\Client;
+use GuzzleHttp\Exception\RequestException;
+use GuzzleHttp\Handler\MockHandler;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
+use GuzzleHttp\Psr7\Request;
+use GuzzleHttp\Psr7\Response;
+use RuntimeException;
 
 final class CodexUsageClientTest extends TestCase
 {
-    public function testFetchesRateLimitsThroughCodexAppServerWithIsolatedCodexHome(): void
+    public function testFetchesRateLimitsThroughDirectUsageEndpoint(): void
     {
-        $dir = $this->tempDir('cap-codex-app-server');
-        $fakeCodex = $dir . '/fake-codex';
-        file_put_contents($fakeCodex, <<<'PHP'
-#!/usr/bin/env php
-<?php
-if (($argv[1] ?? '') !== 'app-server' || ($argv[2] ?? '') !== '--listen' || ($argv[3] ?? '') !== 'stdio://') {
-    fwrite(STDERR, "unexpected args\n");
-    exit(2);
-}
-$home = getenv('CODEX_HOME');
-$auth = json_decode(file_get_contents($home . '/auth.json'), true);
-if (($auth['tokens']['account_id'] ?? null) !== 'acct-alpha') {
-    fwrite(STDERR, "missing isolated auth\n");
-    exit(3);
-}
-if (!array_key_exists('OPENAI_API_KEY', $auth) || $auth['OPENAI_API_KEY'] !== null) {
-    fwrite(STDERR, "missing openai api key placeholder\n");
-    exit(4);
-}
-if (!is_string($auth['last_refresh'] ?? null) || preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z$/', $auth['last_refresh']) !== 1) {
-    fwrite(STDERR, "missing codex last_refresh\n");
-    exit(5);
-}
-mkdir($home . '/skills/.system/nested', 0700, true);
-file_put_contents($home . '/skills/.system/nested/cache.json', '{}');
-while (($line = fgets(STDIN)) !== false) {
-    $message = json_decode($line, true);
-    if (($message['method'] ?? '') === 'initialize') {
-        echo json_encode(['id' => $message['id'], 'result' => [
-            'userAgent' => 'fake',
-            'codexHome' => $home,
-            'platformFamily' => 'unix',
-            'platformOs' => 'linux',
-        ]]) . "\n";
-        continue;
-    }
-    if (($message['method'] ?? '') === 'account/rateLimits/read') {
-        echo json_encode(['id' => $message['id'], 'result' => [
-            'rateLimits' => [
-                'limitId' => 'codex',
-                'limitName' => null,
-                'primary' => ['usedPercent' => 93.0, 'windowDurationMins' => 300, 'resetsAt' => 1776756600],
-                'secondary' => ['usedPercent' => 15.0, 'windowDurationMins' => 10080, 'resetsAt' => 1777338600],
-                'credits' => null,
-                'planType' => 'plus',
-                'rateLimitReachedType' => null,
-            ],
-            'rateLimitsByLimitId' => null,
-        ]]) . "\n";
-        continue;
-    }
-    echo json_encode(['id' => $message['id'] ?? null, 'error' => ['message' => 'unexpected method']]) . "\n";
-}
-PHP);
-        chmod($fakeCodex, 0700);
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(200, ['Content-Type' => 'application/json'], json_encode([
+                'plan_type' => 'plus',
+                'rate_limit' => [
+                    'primary_window' => [
+                        'used_percent' => 93.0,
+                        'limit_window_seconds' => 18_000,
+                        'reset_at' => 1_776_756_600,
+                    ],
+                    'secondary_window' => [
+                        'used_percent' => 15.0,
+                        'limit_window_seconds' => 604_800,
+                        'reset_at' => 1_777_338_600,
+                    ],
+                ],
+            ], JSON_THROW_ON_ERROR)),
+        ]));
+        $stack->push(Middleware::history($history));
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
 
-        $usage = (new CodexUsageClient($fakeCodex, timeoutSeconds: 2, tempRoot: $dir))->fetch($account);
+        $usage = (new CodexUsageClient(
+            'https://chatgpt.com/backend-api',
+            timeoutSeconds: 2,
+            http: new Client(['handler' => $stack]),
+            originator: 'codex-originator-test',
+            userAgent: 'codex-user-agent-test',
+            residency: 'global',
+        ))->fetch($account);
 
         self::assertSame('plus', $usage->planType);
         self::assertSame(93.0, $usage->primary?->usedPercent);
         self::assertSame(15.0, $usage->secondary?->usedPercent);
-        self::assertCount(0, glob($dir . '/codex-home-*') ?: []);
+        self::assertCount(1, $history);
+        /** @var array{request:Request,options:array<string,mixed>} $transaction */
+        $transaction = $history[0];
+        $request = $transaction['request'];
+        self::assertSame('https://chatgpt.com/backend-api/wham/usage', (string) $request->getUri());
+        self::assertSame('Bearer ' . $account->accessToken(), $request->getHeaderLine('Authorization'));
+        self::assertSame('acct-alpha', $request->getHeaderLine('ChatGPT-Account-ID'));
+        self::assertSame('codex-originator-test', $request->getHeaderLine('originator'));
+        self::assertSame('codex-user-agent-test', $request->getHeaderLine('User-Agent'));
+        self::assertSame('global', $request->getHeaderLine('x-openai-internal-codex-residency'));
+        self::assertSame([], $transaction['options']['proxy'] ?? null);
     }
 
-    public function testFetchInjectsConfiguredProxyEnvironmentIntoCodexAppServer(): void
+    public function testTranslatesConfiguredProxyEnvironmentIntoGuzzleProxyOptions(): void
     {
-        $dir = $this->tempDir('cap-codex-app-server-proxy');
-        $fakeCodex = $dir . '/fake-codex';
-        file_put_contents($fakeCodex, <<<'PHP'
-#!/usr/bin/env php
-<?php
-if (getenv('HTTP_PROXY') !== 'http://proxy.local:8080') {
-    fwrite(STDERR, "missing HTTP_PROXY\n");
-    exit(6);
-}
-if (getenv('HTTPS_PROXY') !== 'http://secure-proxy.local:8443') {
-    fwrite(STDERR, "missing HTTPS_PROXY\n");
-    exit(7);
-}
-if (getenv('NO_PROXY') !== 'localhost,127.0.0.1') {
-    fwrite(STDERR, "missing NO_PROXY\n");
-    exit(8);
-}
-while (($line = fgets(STDIN)) !== false) {
-    $message = json_decode($line, true);
-    if (($message['method'] ?? '') === 'initialize') {
-        echo json_encode(['id' => $message['id'], 'result' => []]) . "\n";
-        continue;
-    }
-    echo json_encode(['id' => $message['id'], 'result' => [
-        'rateLimits' => [
-            'primary' => ['usedPercent' => 10.0, 'windowDurationMins' => 300, 'resetsAt' => null],
-            'secondary' => null,
-            'planType' => 'plus',
-        ],
-    ]]) . "\n";
-}
-PHP);
-        chmod($fakeCodex, 0700);
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(200, ['Content-Type' => 'application/json'], json_encode([
+                'rateLimits' => [
+                    'primary' => ['usedPercent' => 10.0, 'windowDurationMins' => 300],
+                    'planType' => 'plus',
+                ],
+            ], JSON_THROW_ON_ERROR)),
+        ]));
+        $stack->push(Middleware::history($history));
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
 
-        $usage = (new CodexUsageClient(
-            $fakeCodex,
+        (new CodexUsageClient(
+            'https://chatgpt.com/backend-api',
             timeoutSeconds: 2,
-            tempRoot: $dir,
             proxyEnv: [
                 'HTTP_PROXY' => 'http://proxy.local:8080',
                 'HTTPS_PROXY' => 'http://secure-proxy.local:8443',
                 'NO_PROXY' => 'localhost,127.0.0.1',
             ],
+            http: new Client(['handler' => $stack]),
         ))->fetch($account);
 
-        self::assertSame('plus', $usage->planType);
-        self::assertSame(10.0, $usage->primary?->usedPercent);
+        /** @var array{options:array<string,mixed>} $transaction */
+        $transaction = $history[0];
+        self::assertSame([
+            'http' => 'http://proxy.local:8080',
+            'https' => 'http://secure-proxy.local:8443',
+            'no' => ['localhost', '127.0.0.1'],
+        ], $transaction['options']['proxy'] ?? null);
     }
 
-    public function testFetchDoesNotLeakParentProcessProxyEnvironmentIntoCodexAppServer(): void
+    public function testFallsBackToHttpProxyForHttpsUsageEndpoint(): void
+    {
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(200, ['Content-Type' => 'application/json'], json_encode([
+                'rateLimits' => [
+                    'primary' => ['usedPercent' => 10.0, 'windowDurationMins' => 300],
+                    'planType' => 'plus',
+                ],
+            ], JSON_THROW_ON_ERROR)),
+        ]));
+        $stack->push(Middleware::history($history));
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+
+        (new CodexUsageClient(
+            'https://chatgpt.com/backend-api',
+            timeoutSeconds: 2,
+            proxyEnv: [
+                'HTTP_PROXY' => 'http://proxy.local:8080',
+                'NO_PROXY' => 'localhost',
+            ],
+            http: new Client(['handler' => $stack]),
+        ))->fetch($account);
+
+        /** @var array{options:array<string,mixed>} $transaction */
+        $transaction = $history[0];
+        self::assertSame([
+            'http' => 'http://proxy.local:8080',
+            'https' => 'http://proxy.local:8080',
+            'no' => ['localhost'],
+        ], $transaction['options']['proxy'] ?? null);
+    }
+
+    public function testDoesNotReadParentProcessProxyEnvironment(): void
     {
         $snapshot = [
             'HTTP_PROXY' => getenv('HTTP_PROXY') === false ? null : getenv('HTTP_PROXY'),
@@ -139,34 +143,17 @@ PHP);
             'https_proxy' => getenv('https_proxy') === false ? null : getenv('https_proxy'),
             'all_proxy' => getenv('all_proxy') === false ? null : getenv('all_proxy'),
         ];
-        $dir = $this->tempDir('cap-codex-app-server-proxy-isolation');
-        $fakeCodex = $dir . '/fake-codex';
-        file_put_contents($fakeCodex, <<<'PHP'
-#!/usr/bin/env php
-<?php
-foreach (['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'] as $name) {
-    $value = getenv($name);
-    if ($value !== false && $value !== '') {
-        fwrite(STDERR, "leaked $name\n");
-        exit(9);
-    }
-}
-if (getenv('NO_PROXY') !== 'localhost') {
-    fwrite(STDERR, "missing explicit NO_PROXY\n");
-    exit(10);
-}
-while (($line = fgets(STDIN)) !== false) {
-    $message = json_decode($line, true);
-    echo json_encode(['id' => $message['id'], 'result' => [
-        'rateLimits' => [
-            'primary' => ['usedPercent' => 10.0, 'windowDurationMins' => 300, 'resetsAt' => null],
-            'secondary' => null,
-            'planType' => 'plus',
-        ],
-    ]]) . "\n";
-}
-PHP);
-        chmod($fakeCodex, 0700);
+
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(200, ['Content-Type' => 'application/json'], json_encode([
+                'rateLimits' => [
+                    'primary' => ['usedPercent' => 10.0, 'windowDurationMins' => 300],
+                    'planType' => 'plus',
+                ],
+            ], JSON_THROW_ON_ERROR)),
+        ]));
+        $stack->push(Middleware::history($history));
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
 
         try {
@@ -174,14 +161,12 @@ PHP);
                 putenv($name . '=http://standard-proxy.local:8080');
             }
 
-            $usage = (new CodexUsageClient(
-                $fakeCodex,
+            (new CodexUsageClient(
+                'https://chatgpt.com/backend-api',
                 timeoutSeconds: 2,
-                tempRoot: $dir,
                 proxyEnv: ['NO_PROXY' => 'localhost'],
+                http: new Client(['handler' => $stack]),
             ))->fetch($account);
-
-            self::assertSame('plus', $usage->planType);
         } finally {
             foreach ($snapshot as $name => $value) {
                 if ($value === null) {
@@ -191,5 +176,91 @@ PHP);
                 putenv($name . '=' . $value);
             }
         }
+
+        /** @var array{options:array<string,mixed>} $transaction */
+        $transaction = $history[0];
+        self::assertSame(['no' => ['localhost']], $transaction['options']['proxy'] ?? null);
+    }
+
+    public function testFallsBackToDefaultUsageBaseUrlWhenBaseUrlIsNotUrl(): void
+    {
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(200, ['Content-Type' => 'application/json'], json_encode([
+                'rateLimits' => [
+                    'primary' => ['usedPercent' => 10.0, 'windowDurationMins' => 300],
+                    'planType' => 'plus',
+                ],
+            ], JSON_THROW_ON_ERROR)),
+        ]));
+        $stack->push(Middleware::history($history));
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+
+        (new CodexUsageClient('/usr/bin/codex', http: new Client(['handler' => $stack])))->fetch($account);
+
+        /** @var array{request:Request} $transaction */
+        $transaction = $history[0];
+        self::assertSame('https://chatgpt.com/backend-api/wham/usage', (string) $transaction['request']->getUri());
+    }
+
+    public function testUsesCodexUsageEndpointForNonChatGptBaseUrl(): void
+    {
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(200, ['Content-Type' => 'application/json'], json_encode([
+                'rateLimits' => [
+                    'primary' => ['usedPercent' => 10.0, 'windowDurationMins' => 300],
+                    'planType' => 'plus',
+                ],
+            ], JSON_THROW_ON_ERROR)),
+        ]));
+        $stack->push(Middleware::history($history));
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+
+        (new CodexUsageClient(
+            baseUrl: 'https://proxy.example.test',
+            http: new Client(['handler' => $stack]),
+        ))->fetch($account);
+
+        /** @var array{request:Request} $transaction */
+        $transaction = $history[0];
+        self::assertSame('https://proxy.example.test/api/codex/usage', (string) $transaction['request']->getUri());
+    }
+
+    public function testSummarizesHttpFailures(): void
+    {
+        $http = new Client([
+            'handler' => HandlerStack::create(new MockHandler([
+                new Response(401, ['Content-Type' => 'application/json', 'x-request-id' => 'req-1'], json_encode([
+                    'error' => [
+                        'code' => 'token_invalidated',
+                        'message' => 'Your authentication token has been invalidated.',
+                    ],
+                ], JSON_THROW_ON_ERROR)),
+            ])),
+        ]);
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('usage endpoint returned HTTP 401');
+        $this->expectExceptionMessage('token_invalidated');
+        $this->expectExceptionMessage('req-1');
+
+        (new CodexUsageClient(http: $http))->fetch($account);
+    }
+
+    public function testWrapsTransportFailures(): void
+    {
+        $http = new Client([
+            'handler' => HandlerStack::create(new MockHandler([
+                new RequestException('network down', new Request('GET', 'https://chatgpt.com/backend-api/wham/usage')),
+            ])),
+        ]);
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('usage endpoint request failed: network down');
+
+        (new CodexUsageClient(http: $http))->fetch($account);
     }
 }

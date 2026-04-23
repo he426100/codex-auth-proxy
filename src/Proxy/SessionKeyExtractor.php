@@ -11,8 +11,8 @@ final class SessionKeyExtractor
         return $this->extractWithPriority(
             $headers,
             $body,
-            ['x-codex-turn-state', 'x-session-id', 'x-codex-session-id', 'x-codex-thread-id', 'openai-conversation-id', 'idempotency-key'],
-            ['conversation_id', 'thread_id', 'session_id', 'previous_response_id'],
+            ['x-codex-turn-state', 'session_id', 'conversation_id', 'x-session-id', 'x-codex-session-id', 'x-codex-thread-id', 'openai-conversation-id', 'idempotency-key'],
+            ['conversation_id', 'thread_id', 'session_id', 'previous_response_id', 'prompt_cache_key'],
         );
     }
 
@@ -21,8 +21,8 @@ final class SessionKeyExtractor
         return $this->extractWithPriority(
             $headers,
             $body,
-            ['x-session-id', 'x-codex-session-id', 'x-codex-thread-id', 'openai-conversation-id', 'idempotency-key', 'x-codex-turn-state'],
-            ['conversation_id', 'thread_id', 'session_id', 'previous_response_id'],
+            ['session_id', 'conversation_id', 'x-session-id', 'x-codex-session-id', 'x-codex-thread-id', 'openai-conversation-id', 'idempotency-key', 'x-codex-turn-state'],
+            ['conversation_id', 'thread_id', 'session_id', 'previous_response_id', 'prompt_cache_key'],
         );
     }
 
@@ -45,6 +45,13 @@ final class SessionKeyExtractor
             return new SessionKey('global');
         }
 
+        foreach ($bodyKeys as $key) {
+            $value = $decoded[$key] ?? null;
+            if (is_string($value) && trim($value) !== '') {
+                return new SessionKey($key . ':' . trim($value));
+            }
+        }
+
         $metadataUserId = $decoded['metadata']['user_id'] ?? null;
         if (is_string($metadataUserId) && trim($metadataUserId) !== '') {
             $metadataUserId = trim($metadataUserId);
@@ -58,13 +65,6 @@ final class SessionKeyExtractor
             }
 
             return new SessionKey('metadata.user_id:' . $metadataUserId);
-        }
-
-        foreach ($bodyKeys as $key) {
-            $value = $decoded[$key] ?? null;
-            if (is_string($value) && trim($value) !== '') {
-                return new SessionKey($key . ':' . trim($value));
-            }
         }
 
         [$primary, $fallback] = $this->messageHash($decoded);

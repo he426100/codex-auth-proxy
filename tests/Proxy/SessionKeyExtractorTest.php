@@ -41,6 +41,31 @@ final class SessionKeyExtractorTest extends TestCase
         self::assertSame('conversation_id:conv-1', $key->primary);
     }
 
+    public function testPrefersNativeConversationIdOverMetadataSession(): void
+    {
+        $extractor = new SessionKeyExtractor();
+
+        $key = $extractor->extract([], json_encode([
+            'conversation_id' => 'conv-native-1',
+            'metadata' => [
+                'user_id' => '{"session_id":"metadata-session-1"}',
+            ],
+        ], JSON_THROW_ON_ERROR));
+
+        self::assertSame('conversation_id:conv-native-1', $key->primary);
+    }
+
+    public function testUsesPromptCacheKeyAsFallbackAfterNativeAnchors(): void
+    {
+        $extractor = new SessionKeyExtractor();
+
+        $fallback = $extractor->extract([], '{"prompt_cache_key":"cache-1","input":[]}');
+        $native = $extractor->extract([], '{"conversation_id":"conv-1","prompt_cache_key":"cache-1","input":[]}');
+
+        self::assertSame('prompt_cache_key:cache-1', $fallback->primary);
+        self::assertSame('conversation_id:conv-1', $native->primary);
+    }
+
     public function testExtractExecutionSessionPrefersStableSessionHeaderOverTurnState(): void
     {
         $extractor = new SessionKeyExtractor();
@@ -51,6 +76,18 @@ final class SessionKeyExtractorTest extends TestCase
         ], '{}');
 
         self::assertSame('x-session-id:session-stable-1', $key->primary);
+    }
+
+    public function testExtractExecutionSessionAcceptsNativeSessionIdHeader(): void
+    {
+        $extractor = new SessionKeyExtractor();
+
+        $key = $extractor->extractExecutionSession([
+            'session_id' => 'native-session-1',
+            'x-codex-turn-state' => 'turn-1',
+        ], '{}');
+
+        self::assertSame('session_id:native-session-1', $key->primary);
     }
 
     public function testExtractExecutionSessionFallsBackToTurnState(): void

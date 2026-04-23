@@ -10,7 +10,12 @@ final class UpstreamHeaderFactory
 {
     private const WEBSOCKET_BETA = 'responses_websockets=2026-02-06';
 
-    public function __construct(private readonly string $userAgent = '', private readonly string $betaFeatures = '')
+    public function __construct(
+        private readonly string $userAgent = '',
+        private readonly string $betaFeatures = '',
+        private readonly string $originator = 'codex-tui',
+        private readonly string $residency = '',
+    )
     {
     }
 
@@ -45,6 +50,11 @@ final class UpstreamHeaderFactory
                 'openai-beta',
                 'originator',
                 'chatgpt-account-id',
+                'session_id',
+                'x-codex-window-id',
+                'x-openai-subagent',
+                'x-codex-parent-thread-id',
+                'x-openai-internal-codex-residency',
             ], true)) {
                 continue;
             }
@@ -79,6 +89,10 @@ final class UpstreamHeaderFactory
             'X-Codex-Turn-Metadata' => 'x-codex-turn-metadata',
             'X-Client-Request-Id' => 'x-client-request-id',
             'X-Responsesapi-Include-Timing-Metrics' => 'x-responsesapi-include-timing-metrics',
+            'session_id' => 'session_id',
+            'X-Codex-Window-Id' => 'x-codex-window-id',
+            'X-OpenAI-Subagent' => 'x-openai-subagent',
+            'X-Codex-Parent-Thread-Id' => 'x-codex-parent-thread-id',
             'Version' => 'version',
         ] as $canonical => $source) {
             $value = $this->headerValue($downstreamHeaders, $source);
@@ -87,8 +101,17 @@ final class UpstreamHeaderFactory
             }
         }
 
-        $headers['Originator'] = $this->headerValue($downstreamHeaders, 'originator') ?? 'codex-tui';
-        $headers['Chatgpt-Account-Id'] = $account->accountId();
+        $headers['Originator'] = $this->headerValue($downstreamHeaders, 'originator') ?? $this->originator;
+        $headers['ChatGPT-Account-ID'] = $account->accountId();
+        $residency = $this->headerValue($downstreamHeaders, 'x-openai-internal-codex-residency') ?? $this->residency;
+        if ($residency !== '') {
+            $headers['x-openai-internal-codex-residency'] = $residency;
+        }
+
+        $userAgent = $this->headerValue($downstreamHeaders, 'user-agent') ?? $this->userAgent;
+        if ($userAgent !== '') {
+            $headers['User-Agent'] = $userAgent;
+        }
 
         if ($websocket) {
             $headers['OpenAI-Beta'] = $this->webSocketBetaHeader($this->headerValue($downstreamHeaders, 'openai-beta'));
@@ -98,9 +121,6 @@ final class UpstreamHeaderFactory
         $headers['Content-Type'] = $this->headerValue($downstreamHeaders, 'content-type') ?? 'application/json';
         $headers['Accept'] = $httpAccept ?? 'text/event-stream';
         $headers['Connection'] = 'Keep-Alive';
-        if ($this->userAgent !== '') {
-            $headers['User-Agent'] = $this->headerValue($downstreamHeaders, 'user-agent') ?? $this->userAgent;
-        }
     }
 
     /** @param array<string,mixed> $headers */

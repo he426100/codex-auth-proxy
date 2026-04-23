@@ -54,4 +54,5 @@ $http = new Client([
     logger: new NullLogger(),
     tokenRefresher: new TokenRefresher($http),
     requestTraceLogger: new RequestTraceLogger(LoggerFactory::createTrace($home . '/logs/trace.jsonl')),
+    usageRefreshIntervalSeconds: 0,
 ))->start();

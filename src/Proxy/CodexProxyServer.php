@@ -14,6 +14,8 @@ use CodexAuthProxy\Routing\ErrorClassification;
 use CodexAuthProxy\Routing\ErrorClassifier;
 use CodexAuthProxy\Routing\Scheduler;
 use CodexAuthProxy\Routing\StateStore;
+use CodexAuthProxy\Usage\AccountUsageRefresher;
+use CodexAuthProxy\Usage\CodexUsageClient;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use RuntimeException;
@@ -43,12 +45,16 @@ final class CodexProxyServer
         private readonly ?OutboundProxyConfig $outboundProxyConfig = null,
         private readonly string $codexUserAgent = 'codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0',
         private readonly string $codexBetaFeatures = 'multi_agent',
+        private readonly string $codexOriginator = 'codex-tui',
+        private readonly string $codexResidency = '',
+        private readonly string $usageBaseUrl = 'https://chatgpt.com/backend-api',
         private readonly ?RequestTraceLogger $requestTraceLogger = null,
         private readonly RequestIdFactory $requestIdFactory = new RequestIdFactory(),
         private readonly bool $traceMutations = true,
         private readonly bool $traceTimings = false,
         private readonly int $websocketSessionIdleTtlSeconds = 300,
         private readonly int $websocketSessionSweepIntervalSeconds = 30,
+        private readonly int $usageRefreshIntervalSeconds = 600,
     ) {
         $this->activeLogger = $logger ?? new NullLogger();
         $this->activeTokenRefresher = $tokenRefresher ?? new TokenRefresher(proxy: $outboundProxyConfig?->guzzleProxy() ?? []);
@@ -63,7 +69,7 @@ final class CodexProxyServer
         $scheduler = new Scheduler($accounts, StateStore::file($this->stateFile));
         $classifier = new ErrorClassifier($this->defaultCooldownSeconds);
         $extractor = new SessionKeyExtractor();
-        $headers = new UpstreamHeaderFactory($this->codexUserAgent, $this->codexBetaFeatures);
+        $headers = new UpstreamHeaderFactory($this->codexUserAgent, $this->codexBetaFeatures, $this->codexOriginator, $this->codexResidency);
         $payloadNormalizer = new ResponsesPayloadNormalizer();
         $normalizer = new ResponsesWebSocketNormalizer();
         $retryTracker = new WebSocketRetryTracker();
@@ -127,6 +133,7 @@ final class CodexProxyServer
         CodexWebSocketSessionRegistry $sessionRegistry,
     ): void {
         $sessionSweepTimerId = null;
+        $usageRefreshTimerId = null;
         $server->on('open', static function (Server $server, Request $request) use ($sessionRegistry): void {
             $fd = (int) ($request->fd ?? 0);
             if ($fd > 0) {
@@ -147,8 +154,9 @@ final class CodexProxyServer
             $this->handleHttp($request, $response, $scheduler, $classifier, $repository, $extractor, $headers, $payloadNormalizer);
         });
 
-        $server->on('workerStart', function () use (&$sessionSweepTimerId, $sessionRegistry): void {
+        $server->on('workerStart', function () use (&$sessionSweepTimerId, &$usageRefreshTimerId, $sessionRegistry, $repository, $scheduler): void {
             if ($this->websocketSessionIdleTtlSeconds <= 0 || $this->websocketSessionSweepIntervalSeconds <= 0) {
+                $this->startUsageRefreshTimer($repository, $scheduler, $usageRefreshTimerId);
                 return;
             }
 
@@ -157,12 +165,17 @@ final class CodexProxyServer
                     $client->close();
                 }
             });
+            $this->startUsageRefreshTimer($repository, $scheduler, $usageRefreshTimerId);
         });
 
-        $server->on($this->shutdownEvent(), function () use ($sessionRegistry, &$sessionSweepTimerId): void {
+        $server->on($this->shutdownEvent(), function () use ($sessionRegistry, &$sessionSweepTimerId, &$usageRefreshTimerId): void {
             if (is_int($sessionSweepTimerId)) {
                 Timer::clear($sessionSweepTimerId);
                 $sessionSweepTimerId = null;
+            }
+            if (is_int($usageRefreshTimerId)) {
+                Timer::clear($usageRefreshTimerId);
+                $usageRefreshTimerId = null;
             }
             foreach ($sessionRegistry->clearAll() as $client) {
                 $client->close();
@@ -174,6 +187,53 @@ final class CodexProxyServer
     private function shutdownEvent(): string
     {
         return 'shutdown';
+    }
+
+    private function startUsageRefreshTimer(AccountRepository $repository, Scheduler $scheduler, ?int &$timerId): void
+    {
+        if ($this->usageRefreshIntervalSeconds <= 0) {
+            return;
+        }
+
+        $running = false;
+        $refresh = function () use ($repository, $scheduler, &$running): void {
+            if ($running) {
+                return;
+            }
+            $running = true;
+            Coroutine::create(function () use ($repository, $scheduler, &$running): void {
+                try {
+                    $summary = $this->accountUsageRefresher($repository, $scheduler)
+                        ->refreshAll($repository, StateStore::file($this->stateFile), time());
+                    $this->syncSchedulerAccounts($repository, $scheduler);
+                    $this->activeLogger->info('Refreshed Codex account usage snapshots', $summary);
+                } catch (Throwable $throwable) {
+                    $this->activeLogger->warning('Failed to refresh Codex account usage snapshots', [
+                        'error' => $throwable->getMessage(),
+                    ]);
+                } finally {
+                    $running = false;
+                }
+            });
+        };
+
+        $refresh();
+        $timerId = Timer::tick($this->usageRefreshIntervalSeconds * 1000, $refresh);
+    }
+
+    private function accountUsageRefresher(AccountRepository $repository, Scheduler $scheduler): AccountUsageRefresher
+    {
+        return new AccountUsageRefresher(
+            new CodexUsageClient(
+                baseUrl: $this->usageBaseUrl,
+                proxyEnv: $this->outboundProxyConfig?->environment() ?? [],
+                originator: $this->codexOriginator,
+                userAgent: $this->codexUserAgent,
+                residency: $this->codexResidency,
+            ),
+            fn (CodexAccount $account): CodexAccount => $this->freshAccount($account, $repository, $scheduler),
+            $this->activeLogger,
+        );
     }
 
     private function handleHttp(

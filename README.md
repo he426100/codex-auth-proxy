@@ -107,11 +107,11 @@ bin/codex-auth-proxy accounts delete account-a
 
 `accounts bindings` reads the local `state.json` and shows which session key is currently bound to which account, together with the account plan, cooldown state, availability, and the latest cached usage check time. It does not call any remote endpoint, so it is useful when debugging which account an active session is pinned to. Pass the optional second argument to filter by an exact session key. Add `--json` for machine-readable output.
 
-`accounts refresh` uses the existing usage reader to fetch the current Codex quota for one account or all accounts, then updates the local state cache.
+`accounts refresh` fetches the current Codex quota for one account or all accounts through the direct ChatGPT usage endpoint, then updates the local state cache.
 
 `serve` reloads the account directory before handling each new request, so `accounts refresh`, `login`, `import`, or external `.account.json` updates take effect without restarting the proxy.
 
-`accounts status` creates a temporary isolated `CODEX_HOME` for the selected account, writes that account's `auth.json`, and calls the local `codex app-server` `account/rateLimits/read` method. This uses Codex CLI's own quota reader instead of guessing remote usage URLs.
+`accounts status` uses the same direct usage reader and prints the live plan plus quota windows for the selected account. When no account name is provided, it checks every imported account.
 
 It prints the account plan plus the 5h and weekly quota windows:
 
@@ -122,9 +122,7 @@ account-a
   Weekly limit: 85% left (resets 2026-04-28 13:10)
 ```
 
-When no account name is provided, it checks every imported account. Add `--json` for machine-readable output. `accounts delete` archives the account file as `.deleted.YYYYmmddHHMMSS` after confirmation; use `--yes` to skip the prompt.
-
-This command requires the `codex` binary to be available and sends the stored ChatGPT OAuth token to OpenAI through Codex CLI's official app-server flow.
+Add `--json` for machine-readable output. `accounts delete` archives the account file as `.deleted.YYYYmmddHHMMSS` after confirmation; use `--yes` to skip the prompt.
 
 Print the Codex config snippet:
 
@@ -145,7 +143,7 @@ Start the proxy:
 bin/codex-auth-proxy serve --port=1456
 ```
 
-The proxy supports Codex HTTP/SSE and WebSocket requests. Requests are mapped from Codex CLI's `/v1/*` base URL to ChatGPT's Codex backend (`https://chatgpt.com/backend-api/codex`). `serve` stays on the direct upstream proxy path; it only consults the cached quota availability and cooldown state to choose an account, and it does not depend on `app-server` being in the main request path. HTTP streams are framed as SSE before forwarding to Codex, and first-frame quota/auth errors are intercepted before bytes are sent so the proxy can switch to another available account. WebSocket requests use Codex websocket v2 headers and can fail over across multiple replacement accounts while no upstream data has been forwarded yet.
+The proxy supports Codex HTTP/SSE and WebSocket requests. Requests are mapped from Codex CLI's `/v1/*` base URL to ChatGPT's Codex backend (`https://chatgpt.com/backend-api/codex`). `serve` stays on the direct upstream proxy path; it consults cached quota availability and cooldown state to choose an account, and periodically refreshes quota snapshots without using `codex app-server`. HTTP streams are framed as SSE before forwarding to Codex, and first-frame quota/auth errors are intercepted before bytes are sent so the proxy can switch to another available account. WebSocket requests use Codex websocket v2 headers and can fail over across multiple replacement accounts while no upstream data has been forwarded yet.
 
 ## Configuration
 
@@ -164,6 +162,10 @@ CODEX_AUTH_PROXY_ACCOUNTS_DIR=/home/me/.config/codex-auth-proxy/accounts
 CODEX_AUTH_PROXY_STATE_FILE=/home/me/.config/codex-auth-proxy/state.json
 CODEX_AUTH_PROXY_CODEX_USER_AGENT="codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0"
 CODEX_AUTH_PROXY_CODEX_BETA_FEATURES=multi_agent
+CODEX_AUTH_PROXY_CODEX_ORIGINATOR=codex-tui
+CODEX_AUTH_PROXY_CODEX_RESIDENCY=
+CODEX_AUTH_PROXY_USAGE_BASE_URL=https://chatgpt.com/backend-api
+CODEX_AUTH_PROXY_USAGE_REFRESH_INTERVAL_SECONDS=600
 CODEX_AUTH_PROXY_LOG_FILE=
 CODEX_AUTH_PROXY_LOG_LEVEL=warning
 CODEX_AUTH_PROXY_TRACE_FILE=
@@ -177,9 +179,11 @@ CODEX_AUTH_PROXY_NO_PROXY=localhost,127.0.0.1,::1
 
 The project intentionally reads only the namespaced proxy variables above. It does not treat shell-level `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, or lowercase variants as application configuration.
 
-Outbound proxy settings are applied to OAuth token exchange, token refresh, `serve` upstream HTTP/SSE and WebSocket connections, and `accounts status` / `accounts refresh` when they spawn `codex app-server`. Proxy URLs support `http://` and `socks5://`. For the `codex app-server` subprocess, shell-level proxy variables are cleared first, then the resolved project proxy settings are exported as standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
+Outbound proxy settings are applied to OAuth token exchange, token refresh, `serve` upstream HTTP/SSE and WebSocket connections, and direct usage reads from `accounts status`, `accounts refresh`, and the `serve` background refresher. Proxy URLs support `http://` and `socks5://`.
 
 `CODEX_AUTH_PROXY_NO_PROXY` supports exact hosts/IPs, `localhost`, loopback addresses, host values with ports, `*`, and suffix matching with either `openai.com` or `.openai.com`.
+
+Set `CODEX_AUTH_PROXY_USAGE_REFRESH_INTERVAL_SECONDS=0` to disable the `serve` background usage refresher.
 
 When `CODEX_AUTH_PROXY_LOG_FILE` and `CODEX_AUTH_PROXY_TRACE_FILE` are left empty, source runs write logs to `runtime/logs` under the project root, and PHAR runs write logs to `runtime/logs` next to the `.phar` file. Set `CODEX_AUTH_PROXY_TRACE_MUTATIONS=true` to record normalization events, and `CODEX_AUTH_PROXY_TRACE_TIMINGS=true` to record request timing. Trace logs do not store prompt content, OAuth tokens, or raw authorization headers.
 

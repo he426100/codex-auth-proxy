@@ -13,7 +13,7 @@ final class UpstreamHeaderFactoryTest extends TestCase
     public function testBuildsCodexHeadersWithoutLeakingDownstreamAuthorization(): void
     {
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
-        $headers = (new UpstreamHeaderFactory('codex-cli-test', 'multi_agent'))->build([
+        $headers = (new UpstreamHeaderFactory('codex-cli-test', 'multi_agent', 'codex-originator-test'))->build([
             'authorization' => 'Bearer downstream',
             'host' => '127.0.0.1:1456',
             'accept' => 'application/json',
@@ -26,8 +26,8 @@ final class UpstreamHeaderFactoryTest extends TestCase
         self::assertSame('application/json', $headers['Content-Type']);
         self::assertSame('text/event-stream', $headers['Accept']);
         self::assertSame('Keep-Alive', $headers['Connection']);
-        self::assertSame('codex-tui', $headers['Originator']);
-        self::assertSame('acct-alpha', $headers['Chatgpt-Account-Id']);
+        self::assertSame('codex-originator-test', $headers['Originator']);
+        self::assertSame('acct-alpha', $headers['ChatGPT-Account-ID']);
         self::assertArrayNotHasKey('authorization', $headers);
     }
 
@@ -56,18 +56,27 @@ final class UpstreamHeaderFactoryTest extends TestCase
     public function testBuildsCodexWebSocketHeaders(): void
     {
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
-        $factory = new UpstreamHeaderFactory('codex-cli-test', 'multi_agent');
+        $factory = new UpstreamHeaderFactory('codex-cli-test', 'multi_agent', 'codex-originator-test');
         $headers = $factory->build([
             'user-agent' => 'downstream-agent',
+            'originator' => 'downstream-originator',
             'openai-beta' => 'existing',
+            'session_id' => 'session-1',
+            'x-codex-window-id' => 'session-1:0',
+            'x-openai-subagent' => 'subagent-1',
+            'x-codex-parent-thread-id' => 'parent-1',
         ], $account, 'chatgpt.com', true);
 
         self::assertSame('Bearer ' . $account->accessToken(), $headers['Authorization']);
+        self::assertSame('downstream-agent', $headers['User-Agent']);
         self::assertSame('multi_agent', $headers['X-Codex-Beta-Features']);
         self::assertSame('responses_websockets=2026-02-06', $headers['OpenAI-Beta']);
-        self::assertSame('codex-tui', $headers['Originator']);
-        self::assertSame('acct-alpha', $headers['Chatgpt-Account-Id']);
-        self::assertArrayNotHasKey('User-Agent', $headers);
+        self::assertSame('downstream-originator', $headers['Originator']);
+        self::assertSame('acct-alpha', $headers['ChatGPT-Account-ID']);
+        self::assertSame('session-1', $headers['session_id']);
+        self::assertSame('session-1:0', $headers['X-Codex-Window-Id']);
+        self::assertSame('subagent-1', $headers['X-OpenAI-Subagent']);
+        self::assertSame('parent-1', $headers['X-Codex-Parent-Thread-Id']);
         self::assertArrayNotHasKey('user-agent', $headers);
     }
 }

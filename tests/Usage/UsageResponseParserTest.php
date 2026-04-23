@@ -97,4 +97,31 @@ final class UsageResponseParserTest extends TestCase
         self::assertSame(20.0, $usage->primary?->usedPercent);
         self::assertSame(30.0, $usage->secondary?->usedPercent);
     }
+
+    public function testParsesDirectWhamUsageShape(): void
+    {
+        $usage = (new UsageResponseParser())->parse([
+            'plan_type' => 'plus',
+            'rate_limit' => [
+                'primary_window' => [
+                    'used_percent' => 93.0,
+                    'limit_window_seconds' => 18_000,
+                    'reset_at' => 1_776_756_600,
+                ],
+                'secondary_window' => [
+                    'used_percent' => 15.0,
+                    'limit_window_seconds' => 604_800,
+                    'reset_at' => 1_777_338_600,
+                ],
+            ],
+        ]);
+
+        self::assertSame('plus', $usage->planType);
+        self::assertSame(93.0, $usage->primary?->usedPercent);
+        self::assertSame(300, $usage->primary?->windowMinutes);
+        self::assertSame(1_776_756_600, $usage->primary?->resetsAt);
+        self::assertSame(15.0, $usage->secondary?->usedPercent);
+        self::assertSame(10080, $usage->secondary?->windowMinutes);
+        self::assertSame(1_777_338_600, $usage->secondary?->resetsAt);
+    }
 }

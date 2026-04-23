@@ -38,4 +38,5 @@ if ($proxyPort <= 0 || $upstreamPort <= 0 || $accountsDir === '' || $home === ''
     logger: new NullLogger(),
     requestTraceLogger: new RequestTraceLogger(LoggerFactory::createTrace($home . '/logs/trace.jsonl')),
     traceTimings: $traceTimings,
+    usageRefreshIntervalSeconds: 0,
 ))->start();

@@ -41,6 +41,20 @@ final class UsageResponseParser
             return $this->rateLimitNode($response['payload']);
         }
 
+        if (isset($response['rate_limit']) && is_array($response['rate_limit'])) {
+            $node = [
+                'primary' => $response['rate_limit']['primary_window'] ?? null,
+                'secondary' => $response['rate_limit']['secondary_window'] ?? null,
+            ];
+            foreach (['plan_type', 'planType'] as $key) {
+                if (isset($response[$key])) {
+                    $node[$key] = $response[$key];
+                }
+            }
+
+            return $node;
+        }
+
         if (isset($response['rateLimitsByLimitId']) && is_array($response['rateLimitsByLimitId'])) {
             $byId = $response['rateLimitsByLimitId'];
             if (isset($byId['codex']) && is_array($byId['codex'])) {
@@ -92,6 +106,12 @@ final class UsageResponseParser
 
         $usedPercent = $this->number($value, ['used_percent', 'usedPercent']);
         $windowMinutes = $this->int($value, ['window_minutes', 'windowDurationMins', 'window_mins']);
+        if ($windowMinutes === null) {
+            $windowSeconds = $this->int($value, ['limit_window_seconds', 'window_seconds', 'windowDurationSecs']);
+            if ($windowSeconds !== null) {
+                $windowMinutes = (int) ceil($windowSeconds / 60);
+            }
+        }
         $resetsAt = $this->int($value, ['resets_at', 'resetsAt', 'reset_at']);
         if ($resetsAt !== null && $resetsAt > 20_000_000_000) {
             $resetsAt = (int) floor($resetsAt / 1000);

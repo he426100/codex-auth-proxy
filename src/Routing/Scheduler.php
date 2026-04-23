@@ -96,6 +96,8 @@ final class Scheduler
         }
 
         $start = $this->state->cursor() % $count;
+        $preferred = [];
+        $lowQuota = [];
         for ($offset = 0; $offset < $count; $offset++) {
             $index = ($start + $offset) % $count;
             $account = $this->accounts[$index];
@@ -106,6 +108,15 @@ final class Scheduler
                 continue;
             }
 
+            if ($this->isLowQuota($account)) {
+                $lowQuota[] = [$index, $account];
+                continue;
+            }
+
+            $preferred[] = [$index, $account];
+        }
+
+        foreach (array_merge($preferred, $lowQuota) as [$index, $account]) {
             $this->state->setCursor($index + 1);
             return $account;
         }
@@ -123,6 +134,25 @@ final class Scheduler
         );
 
         return $availability->routable;
+    }
+
+    private function isLowQuota(CodexAccount $account): bool
+    {
+        $usage = $this->state->accountUsage($account->accountId());
+        if ($usage === null || $usage->error !== null) {
+            return false;
+        }
+
+        foreach ([$usage->primary, $usage->secondary] as $window) {
+            if ($window === null) {
+                continue;
+            }
+            if ($window->leftPercent > 0.0 && $window->leftPercent <= 5.0) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function now(): int
