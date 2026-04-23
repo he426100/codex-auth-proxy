@@ -377,6 +377,38 @@ final class CodexProxyServer
                     $this->timingPayload($timings, $requestStartedAt, null),
                     $throwable->getMessage(),
                 );
+                if ($account instanceof CodexAccount && $this->shouldFallbackWebSocketUpgradeToHttp($throwable, $classifier)) {
+                    $fallbackPayload = $normalizer->normalizeForHttpFallbackWithReport($payload);
+                    $this->tracePayloadMutations($requestId, 'websocket', $sessionKey, $fallbackPayload->mutations());
+                    $this->activeLogger->warning('Falling back WebSocket request to HTTP/SSE upstream', [
+                        'request_id' => $requestId,
+                        'session' => $sessionKey->primary,
+                        'account' => $account->name(),
+                        'error' => $throwable->getMessage(),
+                    ]);
+                    try {
+                        $this->forwardWebSocketPayloadOverHttp(
+                            $server,
+                            $fd,
+                            $request,
+                            $account,
+                            $fallbackPayload->payload(),
+                            $headers,
+                            $classifier,
+                            $sessionKey,
+                            $scheduler,
+                            $repository,
+                            $requestId,
+                        );
+                    } catch (Throwable $fallbackThrowable) {
+                        $this->activeLogger->warning('WebSocket HTTP/SSE fallback failed', [
+                            'request_id' => $requestId,
+                            'error' => $fallbackThrowable->getMessage(),
+                        ]);
+                        $this->pushWebSocketError($server, $fd, 502, $fallbackThrowable->getMessage());
+                    }
+                    return;
+                }
                 $this->pushWebSocketError($server, $fd, 502, $throwable->getMessage());
                 return;
             }
@@ -472,6 +504,212 @@ final class CodexProxyServer
                 'first_byte' => $firstByteMs,
             ],
         ];
+    }
+
+    private function forwardWebSocketPayloadOverHttp(
+        Server $server,
+        int $fd,
+        Request $request,
+        CodexAccount $account,
+        string $body,
+        UpstreamHeaderFactory $headers,
+        ErrorClassifier $classifier,
+        SessionKey $sessionKey,
+        Scheduler $scheduler,
+        AccountRepository $repository,
+        string $requestId,
+    ): void {
+        $authRefreshAttempts = [];
+        while (true) {
+            $result = $this->forwardWebSocketHttpAttempt($server, $fd, $request, $account, $body, $headers);
+            $classification = $classifier->classifyHttpResponse($result['status'], $result['body'], $result['headers']);
+            if (!$classification->hardSwitch() || $result['forwarded']) {
+                if (!$result['forwarded'] && $this->pushBufferedErrorAsWebSocket($server, $fd, $result['body'])) {
+                    return;
+                }
+                if ($result['status'] >= 400 && !$result['forwarded']) {
+                    $this->traceUpstreamError($requestId, 'websocket', 'http_fallback_response', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
+                    $this->pushWebSocketError($server, $fd, $result['status'], $result['body']);
+                }
+                return;
+            }
+
+            $refreshed = $this->refreshAccountAfterAuthFailure($classification, $account, $repository, $scheduler, $authRefreshAttempts);
+            if ($refreshed !== null) {
+                $account = $refreshed;
+                continue;
+            }
+
+            $cooldownSeconds = max(1, $classification->cooldownUntil() - time());
+            $this->traceUpstreamError($requestId, 'websocket', 'http_fallback_hard_switch', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
+            $account = $this->freshAccount(
+                $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository),
+                $repository,
+                $scheduler,
+            );
+        }
+    }
+
+    /** @return array{status:int,body:string,headers:array<string,string>,forwarded:bool,completed:bool} */
+    private function forwardWebSocketHttpAttempt(Server $server, int $fd, Request $request, CodexAccount $account, string $body, UpstreamHeaderFactory $headers): array
+    {
+        $target = new UpstreamTarget($this->upstreamBase);
+        [$host, $port, $ssl] = $target->endpoint();
+        $bodyBuffer = new UpstreamResponseBodyBuffer(false);
+        $forwarded = false;
+        $completed = false;
+        $terminalErrorSent = false;
+        $seenRawBody = '';
+
+        $client = new Client($host, $port, $ssl);
+        $client->set($this->clientOptionsFor($host, [
+            'timeout' => -1,
+            'write_func' => function (Client $client, string $chunk) use ($server, $fd, $bodyBuffer, &$forwarded, &$completed, &$terminalErrorSent, &$seenRawBody): int {
+                $seenRawBody .= $chunk;
+                $responseHeaders = is_array($client->headers ?? null) ? $client->headers : [];
+                foreach ($bodyBuffer->write((int) $client->statusCode, $responseHeaders, $chunk) as $frame) {
+                    $pushed = $this->pushSseFrameAsWebSocket($server, $fd, $frame);
+                    $forwarded = $forwarded || $pushed['forwarded'];
+                    $completed = $completed || $pushed['completed'];
+                    $terminalErrorSent = $terminalErrorSent || $pushed['error'];
+                }
+
+                return strlen($chunk);
+            },
+        ]));
+        $requestUri = $this->requestTarget($request, '/v1/responses');
+        $client->setHeaders($headers->build($request->header ?? [], $account, $host, false, 'text/event-stream'));
+        $client->setMethod('POST');
+        if ($body !== '') {
+            $client->setData($body);
+        }
+
+        $client->execute($target->pathFor($requestUri));
+        $statusCode = (int) $client->statusCode;
+        $status = $statusCode > 0 ? $statusCode : 502;
+        $responseHeaders = is_array($client->headers ?? null) ? $client->headers : [];
+        $buffer = $bodyBuffer->body();
+        if ($statusCode <= 0) {
+            $buffer = $this->upstreamClientError('HTTP fallback request', $client);
+            $responseHeaders = ['Content-Type' => 'text/plain; charset=utf-8'];
+        }
+
+        $tailBody = is_string($client->body ?? null) ? $client->body : '';
+        if ($tailBody !== '') {
+            if ($seenRawBody !== '' && str_starts_with($tailBody, $seenRawBody)) {
+                $tailBody = substr($tailBody, strlen($seenRawBody));
+            } elseif ($seenRawBody !== '' && str_contains($seenRawBody, $tailBody)) {
+                $tailBody = '';
+            }
+        }
+        if ($tailBody !== '') {
+            foreach ($bodyBuffer->write($statusCode, $responseHeaders, $tailBody) as $frame) {
+                $pushed = $this->pushSseFrameAsWebSocket($server, $fd, $frame);
+                $forwarded = $forwarded || $pushed['forwarded'];
+                $completed = $completed || $pushed['completed'];
+                $terminalErrorSent = $terminalErrorSent || $pushed['error'];
+            }
+        }
+        foreach ($bodyBuffer->flush($responseHeaders) as $frame) {
+            $pushed = $this->pushSseFrameAsWebSocket($server, $fd, $frame);
+            $forwarded = $forwarded || $pushed['forwarded'];
+            $completed = $completed || $pushed['completed'];
+            $terminalErrorSent = $terminalErrorSent || $pushed['error'];
+        }
+        if (!$bodyBuffer->streamed() && $buffer === '' && is_string($client->body ?? null)) {
+            $buffer = $client->body;
+        }
+        $completed = $completed || $bodyBuffer->completed();
+        $bufferedError = StreamErrorDetector::jsonErrorBody($buffer) !== null;
+        $client->close();
+
+        if ($status < 400 && !$completed && !$terminalErrorSent && !$bufferedError) {
+            $this->pushWebSocketError($server, $fd, 502, $this->incompleteStreamMessage());
+            $forwarded = true;
+        }
+
+        return [
+            'status' => $status,
+            'body' => $buffer,
+            'headers' => $responseHeaders,
+            'forwarded' => $forwarded,
+            'completed' => $completed,
+        ];
+    }
+
+    private function pushBufferedErrorAsWebSocket(Server $server, int $fd, string $body): bool
+    {
+        $payload = StreamErrorDetector::jsonErrorBody($body);
+        if ($payload === null || !$server->isEstablished($fd)) {
+            return false;
+        }
+
+        $server->push($fd, $payload, \WEBSOCKET_OPCODE_TEXT);
+
+        return true;
+    }
+
+    /** @return array{forwarded:bool,completed:bool,error:bool} */
+    private function pushSseFrameAsWebSocket(Server $server, int $fd, string $frame): array
+    {
+        $forwarded = false;
+        $completed = false;
+        $error = false;
+        foreach ($this->webSocketPayloadsFromSseFrame($frame) as $payload) {
+            $payload = StreamErrorDetector::normalizeCompletedPayload($payload);
+            $completed = $completed || StreamErrorDetector::isCompletedPayload($payload);
+            $error = $error || StreamErrorDetector::jsonErrorBody($payload) !== null;
+            if (!$server->isEstablished($fd)) {
+                continue;
+            }
+            $server->push($fd, $payload, \WEBSOCKET_OPCODE_TEXT);
+            $forwarded = true;
+        }
+
+        return [
+            'forwarded' => $forwarded,
+            'completed' => $completed,
+            'error' => $error,
+        ];
+    }
+
+    /** @return list<string> */
+    private function webSocketPayloadsFromSseFrame(string $frame): array
+    {
+        $payloads = [];
+        $dataLines = [];
+        foreach (preg_split('/\R/', $frame) ?: [] as $line) {
+            $line = trim($line);
+            if ($line === '' || str_starts_with($line, 'event:')) {
+                continue;
+            }
+            if (str_starts_with($line, 'data:')) {
+                $dataLines[] = trim(substr($line, strlen('data:')));
+            }
+        }
+
+        foreach ($dataLines as $line) {
+            if ($line === '' || $line === '[DONE]') {
+                continue;
+            }
+            if (json_decode($line, true) !== null || json_last_error() === JSON_ERROR_NONE) {
+                $payloads[] = $line;
+            }
+        }
+
+        if ($payloads !== []) {
+            return $payloads;
+        }
+
+        $trimmed = trim($frame);
+        if (str_starts_with($trimmed, 'data:')) {
+            $trimmed = trim(substr($trimmed, strlen('data:')));
+        }
+        if ($trimmed !== '' && $trimmed !== '[DONE]' && (json_decode($trimmed, true) !== null || json_last_error() === JSON_ERROR_NONE)) {
+            $payloads[] = $trimmed;
+        }
+
+        return $payloads;
     }
 
     /** @param array{status:int,body:string,headers:array<string,string>,streamed:bool,timings:array{upstream:float,first_byte:?float}} $result */
@@ -865,6 +1103,21 @@ final class CodexProxyServer
         }
 
         return $classifier->classifyHttpResponse($failure['status'], $failure['body'], []);
+    }
+
+    private function shouldFallbackWebSocketUpgradeToHttp(Throwable $throwable, ErrorClassifier $classifier): bool
+    {
+        $failure = $this->webSocketUpgradeFailureResult($throwable);
+        if ($failure === null) {
+            return false;
+        }
+
+        $classification = $classifier->classifyHttpResponse($failure['status'], $failure['body'], []);
+        if ($classification->hardSwitch()) {
+            return false;
+        }
+
+        return $failure['status'] <= 0 || in_array($failure['status'], [404, 405, 426], true);
     }
 
     /** @return array{status:int,body:string}|null */

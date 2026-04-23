@@ -19,4 +19,9 @@ final class ResponsesWebSocketNormalizer
     {
         return $this->normalizer->normalizeWebSocketWithReport($payload);
     }
+
+    public function normalizeForHttpFallbackWithReport(string $payload): NormalizedPayload
+    {
+        return $this->normalizer->normalizeWebSocketHttpFallbackWithReport($payload);
+    }
 }

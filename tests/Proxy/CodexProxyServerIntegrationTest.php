@@ -767,6 +767,131 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
+    public function testFallsBackToHttpSseWhenWebSocketUpgradeIsRejected(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-http-fallback');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-requests.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-upgrade-fallback-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $frames = [];
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$frames): void {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $client->set(['timeout' => 5]);
+                if (!$client->upgrade('/v1/responses')) {
+                    $frames[] = 'upgrade failed: ' . (string) $client->errCode;
+                    $client->close();
+                    return;
+                }
+
+                $client->push('{"type":"response.create","model":"gpt-test","input":"hello"}');
+                for ($i = 0; $i < 3; $i++) {
+                    $frame = $client->recv(5);
+                    if (is_object($frame) && property_exists($frame, 'data')) {
+                        $frames[] = (string) $frame->data;
+                        if (str_contains((string) $frame->data, 'response.completed')) {
+                            break;
+                        }
+                        continue;
+                    }
+                    if ($frame !== false && $frame !== '') {
+                        $frames[] = (string) $frame;
+                    }
+                    break;
+                }
+                $client->close();
+            });
+
+            self::assertNotSame([], $frames);
+            self::assertStringContainsString('response.completed', implode("\n", $frames));
+            self::assertStringContainsString('resp_http_fallback', implode("\n", $frames));
+            self::assertStringNotContainsString('upstream_websocket_error', implode("\n", $frames));
+
+            $attempts = $this->waitForJsonLines($captureFile, 2);
+            self::assertSame('GET', $attempts[0]['method']);
+            self::assertSame('websocket', $attempts[0]['upgrade']);
+            self::assertSame('POST', $attempts[1]['method']);
+            self::assertSame('text/event-stream', $attempts[1]['accept']);
+            self::assertStringStartsWith('Bearer ', $attempts[1]['authorization']);
+            self::assertStringNotContainsString('"type":"response.create"', $attempts[1]['body']);
+            self::assertStringContainsString('"stream":true', $attempts[1]['body']);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testForwardsHttpSseErrorAfterWebSocketUpgradeFallback(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-http-fallback-error');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-requests.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-upgrade-fallback-upstream.php', (string) $upstreamPort, $captureFile, 'error'], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $frames = [];
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$frames): void {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $client->set(['timeout' => 5]);
+                if (!$client->upgrade('/v1/responses')) {
+                    $frames[] = 'upgrade failed: ' . (string) $client->errCode;
+                    $client->close();
+                    return;
+                }
+
+                $client->push('{"type":"response.create","model":"gpt-test","input":"hello"}');
+                $frame = $client->recv(5);
+                if (is_object($frame) && property_exists($frame, 'data')) {
+                    $frames[] = (string) $frame->data;
+                } elseif ($frame !== false && $frame !== '') {
+                    $frames[] = (string) $frame;
+                }
+                $client->close();
+            });
+
+            self::assertNotSame([], $frames);
+            self::assertStringContainsString('"type":"error"', implode("\n", $frames));
+            self::assertStringContainsString('server_error', implode("\n", $frames));
+            self::assertStringNotContainsString('upstream_websocket_error', implode("\n", $frames));
+
+            $attempts = $this->waitForJsonLines($captureFile, 2);
+            self::assertSame('GET', $attempts[0]['method']);
+            self::assertSame('POST', $attempts[1]['method']);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
     public function testRetriesWebSocketAcrossAllAvailableAccountsBeforeForwardingSuccess(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {

@@ -28,6 +28,36 @@ final class ResponsesPayloadNormalizer
         return $this->normalize($payload, true);
     }
 
+    public function normalizeWebSocketHttpFallbackWithReport(string $payload): NormalizedPayload
+    {
+        try {
+            $decoded = json_decode($payload, false, flags: JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return $this->normalizeHttpWithReport($payload);
+        }
+
+        if (!$decoded instanceof stdClass) {
+            return $this->normalizeHttpWithReport($payload);
+        }
+
+        $mutations = [];
+        if (property_exists($decoded, 'type')) {
+            unset($decoded->type);
+            $mutations[] = 'websocket_http_fallback.type_removed';
+        }
+        if (!property_exists($decoded, 'stream') || $decoded->stream !== true) {
+            $decoded->stream = true;
+            $mutations[] = 'websocket_http_fallback.stream_true';
+        }
+
+        $normalized = $this->normalizeHttpWithReport(json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+
+        return new NormalizedPayload(
+            $normalized->payload(),
+            array_values(array_unique([...$mutations, ...$normalized->mutations()])),
+        );
+    }
+
     private function normalize(string $payload, bool $websocket): NormalizedPayload
     {
         try {

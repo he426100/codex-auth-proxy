@@ -127,6 +127,25 @@ JSON;
         ], $result->mutations());
     }
 
+    public function testNormalizesWebSocketPayloadForHttpFallback(): void
+    {
+        $payload = '{"type":"response.create","input":"hello","tools":[{"type":"function","parameters":[]}]}';
+
+        $result = (new ResponsesPayloadNormalizer())->normalizeWebSocketHttpFallbackWithReport($payload);
+        $decoded = json_decode($result->payload(), false, flags: JSON_THROW_ON_ERROR);
+
+        self::assertObjectNotHasProperty('type', $decoded);
+        self::assertTrue($decoded->stream);
+        self::assertSame('message', $decoded->input[0]->type);
+        self::assertInstanceOf(stdClass::class, $decoded->tools[0]->parameters);
+        self::assertSame([
+            'websocket_http_fallback.type_removed',
+            'websocket_http_fallback.stream_true',
+            'http.input.string_to_message',
+            'parameters.empty_array_to_object',
+        ], $result->mutations());
+    }
+
     public function testHttpAppliesSafeCodexCompatibilityNormalizations(): void
     {
         $payload = json_encode([
