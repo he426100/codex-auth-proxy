@@ -17,7 +17,11 @@ use Symfony\Component\Console\Output\OutputInterface;
 #[AsCommand(name: 'serve', description: 'Start the local Codex proxy')]
 final class ServeCommand extends ProxyCommand
 {
-    public function __construct(AppConfigLoader $configLoader, private readonly LoggerInterface $logger)
+    public function __construct(
+        AppConfigLoader $configLoader,
+        private readonly LoggerInterface $logger,
+        private readonly RequestTraceLogger $requestTraceLogger,
+    )
     {
         parent::__construct($configLoader);
     }
@@ -48,8 +52,9 @@ final class ServeCommand extends ProxyCommand
             outboundProxyConfig: $outboundProxyConfig,
             codexUserAgent: $config->codexUserAgent,
             codexBetaFeatures: $config->codexBetaFeatures,
-            requestTraceLogger: new RequestTraceLogger($config->traceDir),
+            requestTraceLogger: $this->requestTraceLogger,
             traceMutations: $config->traceMutations,
+            traceTimings: $config->traceTimings,
         ))->start();
 
         return self::SUCCESS;

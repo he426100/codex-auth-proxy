@@ -45,6 +45,7 @@ final class CodexProxyServer
         private readonly ?RequestTraceLogger $requestTraceLogger = null,
         private readonly RequestIdFactory $requestIdFactory = new RequestIdFactory(),
         private readonly bool $traceMutations = true,
+        private readonly bool $traceTimings = false,
     ) {
         $this->activeLogger = $logger ?? new NullLogger();
         $this->activeTokenRefresher = $tokenRefresher ?? new TokenRefresher(proxy: $outboundProxyConfig?->guzzleProxy() ?? []);
@@ -187,18 +188,48 @@ final class CodexProxyServer
         $sessionKey = $extractor->extract($request->header ?? [], $rawBody);
         $normalizedBody = $payloadNormalizer->normalizeHttpWithReport($rawBody);
         $body = $normalizedBody->payload();
+        $requestStartedAt = microtime(true);
+        $timings = [
+            'scheduler_reload' => 0.0,
+            'account_prepare' => 0.0,
+            'upstream' => 0.0,
+        ];
+        $attempts = 0;
         $this->tracePayloadMutations($requestId, 'http', $sessionKey, $normalizedBody->mutations());
         try {
-            $account = $this->freshAccount($this->accountForSessionWithRecovery($sessionKey, $scheduler, $repository), $repository, $scheduler);
+            $accountPrepareStartedAt = microtime(true);
+            $selectionTimings = [];
+            $account = $this->freshAccount($this->accountForSessionWithRecovery($sessionKey, $scheduler, $repository, $selectionTimings), $repository, $scheduler);
+            $timings['scheduler_reload'] += (float) ($selectionTimings['scheduler_reload'] ?? 0.0);
+            $timings['account_prepare'] += $this->elapsedMs($accountPrepareStartedAt);
             $authRefreshAttempts = [];
             while (true) {
                 $result = $this->forward($request, $response, $account, $body, $headers, false);
+                $attempts++;
+                $attemptUpstreamMs = $result['timings']['upstream'];
+                $attemptFirstByteMs = $result['timings']['first_byte'];
+                $timings['upstream'] += $attemptUpstreamMs;
                 $classification = $classifier->classifyHttpResponse($result['status'], $result['body'], $result['headers']);
 
                 if (!$classification->hardSwitch()) {
                     if ($result['status'] >= 400) {
                         $this->traceUpstreamError($requestId, 'http', 'upstream_response', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
                     }
+                    $this->traceRequestTiming(
+                        $requestId,
+                        'http',
+                        'request_completed',
+                        $sessionKey,
+                        $account,
+                        $result['status'],
+                        $classification->type(),
+                        $attempts,
+                        $this->timingPayload(
+                            $timings,
+                            $requestStartedAt,
+                            $attemptFirstByteMs !== null ? ($timings['upstream'] - $attemptUpstreamMs + $attemptFirstByteMs) : null,
+                        ),
+                    );
                     $this->finishBufferedError($response, $result);
                     return;
                 }
@@ -217,17 +248,33 @@ final class CodexProxyServer
                     'cooldown_seconds' => $cooldownSeconds,
                 ]);
                 $this->traceUpstreamError($requestId, 'http', 'hard_switch', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
+                $accountPrepareStartedAt = microtime(true);
+                $selectionTimings = [];
                 $account = $this->freshAccount(
-                    $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository),
+                    $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository, $selectionTimings),
                     $repository,
                     $scheduler,
                 );
+                $timings['scheduler_reload'] += (float) ($selectionTimings['scheduler_reload'] ?? 0.0);
+                $timings['account_prepare'] += $this->elapsedMs($accountPrepareStartedAt);
             }
         } catch (RuntimeException $exception) {
             $this->activeLogger->warning('Codex proxy request unavailable', [
                 'request_id' => $requestId,
                 'error' => $exception->getMessage(),
             ]);
+            $this->traceRequestTiming(
+                $requestId,
+                'http',
+                'request_completed',
+                $sessionKey,
+                null,
+                503,
+                'unavailable',
+                $attempts,
+                $this->timingPayload($timings, $requestStartedAt, null),
+                $exception->getMessage(),
+            );
             $this->finishProxyUnavailable($response, $exception->getMessage());
         }
     }
@@ -274,8 +321,19 @@ final class CodexProxyServer
         if ($client === null) {
             $account = null;
             $authRefreshAttempts = [];
+            $requestStartedAt = microtime(true);
+            $timings = [
+                'scheduler_reload' => 0.0,
+                'account_prepare' => 0.0,
+                'upstream_upgrade' => 0.0,
+            ];
             try {
-                $account = $this->freshAccount($this->accountForSessionWithRecovery($sessionKey, $scheduler, $repository), $repository, $scheduler);
+                $accountPrepareStartedAt = microtime(true);
+                $selectionTimings = [];
+                $account = $this->freshAccount($this->accountForSessionWithRecovery($sessionKey, $scheduler, $repository, $selectionTimings), $repository, $scheduler);
+                $timings['scheduler_reload'] += (float) ($selectionTimings['scheduler_reload'] ?? 0.0);
+                $timings['account_prepare'] += $this->elapsedMs($accountPrepareStartedAt);
+                $upgradeStartedAt = microtime(true);
                 [$client, $account] = $this->openUpstreamWebSocketWithRecovery(
                     $request,
                     $account,
@@ -287,14 +345,38 @@ final class CodexProxyServer
                     $requestId,
                     $authRefreshAttempts,
                 );
+                $timings['upstream_upgrade'] = $this->elapsedMs($upgradeStartedAt);
 
                 $websocketClients[$fd] = $client;
+                $this->traceRequestTiming(
+                    $requestId,
+                    'websocket',
+                    'websocket_opened',
+                    $sessionKey,
+                    $account,
+                    101,
+                    'none',
+                    1,
+                    $this->timingPayload($timings, $requestStartedAt, null),
+                );
                 $this->startUpstreamWebSocketReader($server, $fd, $client, $request, $account, $websocketClients, $websocketLastPayloads, $scheduler, $classifier, $repository, $headers, $retryTracker);
             } catch (Throwable $throwable) {
                 $this->activeLogger->warning('Upstream WebSocket failed', ['request_id' => $requestId, 'error' => $throwable->getMessage()]);
                 if ($account instanceof CodexAccount) {
                     $this->traceUpstreamError($requestId, 'websocket', 'upstream_upgrade', $sessionKey, $account, 502, $throwable->getMessage(), 'transport');
                 }
+                $this->traceRequestTiming(
+                    $requestId,
+                    'websocket',
+                    'websocket_opened',
+                    $sessionKey,
+                    $account instanceof CodexAccount ? $account : null,
+                    502,
+                    'transport',
+                    1,
+                    $this->timingPayload($timings, $requestStartedAt, null),
+                    $throwable->getMessage(),
+                );
                 $this->pushWebSocketError($server, $fd, 502, $throwable->getMessage());
                 return;
             }
@@ -303,18 +385,21 @@ final class CodexProxyServer
         $client->push($payload, (int) $frame->opcode);
     }
 
-    /** @return array{status:int,body:string,headers:array<string,string>,streamed:bool} */
+    /** @return array{status:int,body:string,headers:array<string,string>,streamed:bool,timings:array{upstream:float,first_byte:?float}} */
     private function forward(Request $request, Response $response, CodexAccount $account, string $body, UpstreamHeaderFactory $headers, bool $forceBuffer): array
     {
         $target = new UpstreamTarget($this->upstreamBase);
         [$host, $port, $ssl] = $target->endpoint();
         $headersSent = false;
         $bodyBuffer = new UpstreamResponseBodyBuffer($forceBuffer);
+        $executeStartedAt = 0.0;
+        $firstByteAt = null;
 
         $client = new Client($host, $port, $ssl);
         $client->set($this->clientOptionsFor($host, [
             'timeout' => -1,
-            'write_func' => function (Client $client, string $chunk) use (&$headersSent, $response, $bodyBuffer): int {
+            'write_func' => function (Client $client, string $chunk) use (&$headersSent, $response, $bodyBuffer, &$firstByteAt): int {
+                $firstByteAt ??= microtime(true);
                 foreach ($bodyBuffer->write((int) $client->statusCode, $client->headers ?? [], $chunk) as $frame) {
                     if (!$headersSent) {
                         $this->copyResponseHeaders($response, $client->headers ?? [], $client->statusCode);
@@ -334,6 +419,7 @@ final class CodexProxyServer
         }
 
         $path = $target->pathFor($requestUri);
+        $executeStartedAt = microtime(true);
         $client->execute($path);
         $statusCode = (int) $client->statusCode;
         $status = $statusCode > 0 ? $statusCode : 502;
@@ -351,6 +437,7 @@ final class CodexProxyServer
             $response->write($frame);
         }
         if (!$bodyBuffer->streamed() && $buffer === '' && is_string($client->body ?? null)) {
+            $firstByteAt ??= microtime(true);
             $buffer = $client->body;
         }
         $incompleteStream = $this->httpAcceptFor($requestUri) === 'text/event-stream'
@@ -371,6 +458,8 @@ final class CodexProxyServer
         if ($bodyBuffer->streamed()) {
             $response->end();
         }
+        $upstreamMs = $this->elapsedMs($executeStartedAt);
+        $firstByteMs = $firstByteAt !== null ? $this->elapsedMs($executeStartedAt, $firstByteAt) : null;
         $client->close();
 
         return [
@@ -378,10 +467,14 @@ final class CodexProxyServer
             'body' => $buffer,
             'headers' => $responseHeaders,
             'streamed' => $bodyBuffer->streamed(),
+            'timings' => [
+                'upstream' => $upstreamMs,
+                'first_byte' => $firstByteMs,
+            ],
         ];
     }
 
-    /** @param array{status:int,body:string,headers:array<string,string>,streamed:bool} $result */
+    /** @param array{status:int,body:string,headers:array<string,string>,streamed:bool,timings:array{upstream:float,first_byte:?float}} $result */
     private function finishBufferedError(Response $response, array $result): void
     {
         if ($result['streamed']) {
@@ -831,9 +924,12 @@ final class CodexProxyServer
         return $account;
     }
 
-    private function accountForSessionWithRecovery(SessionKey $sessionKey, Scheduler $scheduler, AccountRepository $repository): CodexAccount
+    /**
+     * @param array<string,float> $timings
+     */
+    private function accountForSessionWithRecovery(SessionKey $sessionKey, Scheduler $scheduler, AccountRepository $repository, array &$timings = []): CodexAccount
     {
-        $this->syncSchedulerAccounts($repository, $scheduler);
+        $timings['scheduler_reload'] = ($timings['scheduler_reload'] ?? 0.0) + $this->syncSchedulerAccounts($repository, $scheduler);
 
         try {
             return $scheduler->accountForSession($sessionKey->primary, $sessionKey->fallback);
@@ -852,8 +948,9 @@ final class CodexProxyServer
         string $cooldownReason,
         Scheduler $scheduler,
         AccountRepository $repository,
+        array &$timings = [],
     ): CodexAccount {
-        $this->syncSchedulerAccounts($repository, $scheduler);
+        $timings['scheduler_reload'] = ($timings['scheduler_reload'] ?? 0.0) + $this->syncSchedulerAccounts($repository, $scheduler);
 
         try {
             return $scheduler->switchAfterHardFailure($sessionKey->primary, $cooldownSeconds, $cooldownReason);
@@ -901,8 +998,9 @@ final class CodexProxyServer
         return $exception->getMessage() === 'No available Codex account';
     }
 
-    private function syncSchedulerAccounts(AccountRepository $repository, Scheduler $scheduler): void
+    private function syncSchedulerAccounts(AccountRepository $repository, Scheduler $scheduler): float
     {
+        $startedAt = microtime(true);
         try {
             $scheduler->replaceAccounts($repository->load());
         } catch (Throwable $throwable) {
@@ -910,6 +1008,8 @@ final class CodexProxyServer
                 'error' => $throwable->getMessage(),
             ]);
         }
+
+        return $this->elapsedMs($startedAt);
     }
 
     private function pushWebSocketError(Server $server, int $fd, int $status, string $message): void
@@ -962,6 +1062,81 @@ final class CodexProxyServer
                 'error' => $throwable->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * @param array<string,float> $timings
+     */
+    private function traceRequestTiming(
+        string $requestId,
+        string $transport,
+        string $phase,
+        SessionKey $sessionKey,
+        ?CodexAccount $account,
+        int $status,
+        string $classification,
+        int $attempts,
+        array $timings,
+        ?string $message = null,
+    ): void {
+        if (!$this->traceTimings || $this->requestTraceLogger === null) {
+            return;
+        }
+
+        $event = [
+            'request_id' => $requestId,
+            'transport' => $transport,
+            'phase' => $phase,
+            'session' => $sessionKey->primary,
+            'status' => $status,
+            'classification' => $classification,
+            'timings_ms' => $timings,
+        ];
+        if ($attempts > 0) {
+            $event['attempts'] = $attempts;
+        }
+        if ($account instanceof CodexAccount) {
+            $event['account'] = $account->name();
+        }
+        if ($message !== null && $message !== '') {
+            $event['message'] = $message;
+        }
+
+        try {
+            $this->requestTraceLogger->event($event);
+        } catch (Throwable $throwable) {
+            $this->activeLogger->warning('Failed to write request timing trace', [
+                'request_id' => $requestId,
+                'error' => $throwable->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * @param array<string,float> $timings
+     * @return array<string,float>
+     */
+    private function timingPayload(array $timings, float $startedAt, ?float $firstByteMs): array
+    {
+        $payload = [];
+        foreach ($timings as $key => $value) {
+            if ($key !== '' && $value >= 0) {
+                $payload[$key] = $value;
+            }
+        }
+        if ($firstByteMs !== null && $firstByteMs >= 0) {
+            $payload['first_byte'] = $firstByteMs;
+        }
+        $payload['total'] = $this->elapsedMs($startedAt);
+
+        return $payload;
+    }
+
+    private function elapsedMs(float $startedAt, ?float $endedAt = null): float
+    {
+        $endedAt ??= microtime(true);
+
+        return max(0.0, ($endedAt - $startedAt) * 1000);
     }
 
     /** @param array<string,string> $headers */

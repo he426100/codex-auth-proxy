@@ -47,18 +47,16 @@ final class AppConfigLoader
                 ?? $this->intValue($defaults['callback_port'] ?? null),
             'callback_timeout_seconds' => $this->intValue($overrides['callback_timeout_seconds'] ?? null)
                 ?? $this->intValue($defaults['callback_timeout_seconds'] ?? null),
-            'log_level' => $this->stringValue($overrides['log_level'] ?? null)
-                ?? $this->stringValue($defaults['log_level'] ?? null),
             'codex_user_agent' => $this->stringValue($overrides['codex_user_agent'] ?? null)
                 ?? $this->stringValue($defaults['codex_user_agent'] ?? null),
             'codex_beta_features' => $this->stringValue($overrides['codex_beta_features'] ?? null)
                 ?? $this->stringValue($defaults['codex_beta_features'] ?? null),
-            'trace_dir' => $this->stringValue($overrides['trace_dir'] ?? null)
-                ?? $this->stringValue($defaults['trace_dir'] ?? null)
-                ?? $root . '/traces',
             'trace_mutations' => $this->boolValue($overrides['trace_mutations'] ?? null)
                 ?? $this->boolValue($defaults['trace_mutations'] ?? null)
                 ?? true,
+            'trace_timings' => $this->boolValue($overrides['trace_timings'] ?? null)
+                ?? $this->boolValue($defaults['trace_timings'] ?? null)
+                ?? false,
             'http_proxy' => $this->stringValue($overrides['http_proxy'] ?? null)
                 ?? $this->stringValue($defaults['http_proxy'] ?? null),
             'https_proxy' => $this->stringValue($overrides['https_proxy'] ?? null)
@@ -78,11 +76,10 @@ final class AppConfigLoader
          *   callback_host:string,
          *   callback_port:int,
          *   callback_timeout_seconds:int,
-         *   log_level:string,
          *   codex_user_agent:string,
          *   codex_beta_features:string,
-         *   trace_dir:string,
          *   trace_mutations:bool,
+         *   trace_timings:bool,
          *   http_proxy:?string,
          *   https_proxy:?string,
          *   no_proxy:string
@@ -100,11 +97,10 @@ final class AppConfigLoader
             $processed['callback_host'],
             $processed['callback_port'],
             $processed['callback_timeout_seconds'],
-            $processed['log_level'],
             $processed['codex_user_agent'],
             $processed['codex_beta_features'],
-            $processed['trace_dir'],
             $processed['trace_mutations'],
+            $processed['trace_timings'],
             $processed['http_proxy'],
             $processed['https_proxy'],
             $processed['no_proxy'],

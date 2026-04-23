@@ -5,4 +5,14 @@ declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
 
+if (!defined('BASE_PATH')) {
+    define(
+        'BASE_PATH',
+        \CodexAuthProxy\Support\BasePath::resolve(
+            pharPath: \Phar::running(false),
+            sourceBasePath: dirname(__DIR__),
+        ),
+    );
+}
+
 exit((new CodexAuthProxy\Console\Application())->run());

@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace CodexAuthProxy\Observability;
 
-use RuntimeException;
+use Psr\Log\LoggerInterface;
 
 final class RequestTraceLogger
 {
@@ -19,29 +19,20 @@ final class RequestTraceLogger
         'instructions' => true,
     ];
 
-    public function __construct(private readonly string $traceDir)
+    public function __construct(private readonly LoggerInterface $logger)
     {
     }
 
     /** @param array<string,mixed> $event */
     public function error(array $event): void
     {
-        $this->event($event);
+        $this->logger->warning('request_trace_error', $this->payload($event));
     }
 
     /** @param array<string,mixed> $event */
     public function event(array $event): void
     {
-        $payload = $this->payload($event);
-        $this->ensureTraceDir();
-
-        $requestId = preg_replace('/[^a-zA-Z0-9_-]/', '_', (string) ($payload['request_id'] ?? 'unknown'));
-        $path = rtrim($this->traceDir, '/') . '/' . $this->timestampForFilename() . '-' . $requestId . '-' . bin2hex(random_bytes(2)) . '.json';
-        $json = json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
-
-        if (file_put_contents($path, $json) === false) {
-            throw new RuntimeException('Failed to write request trace: ' . $path);
-        }
+        $this->logger->info('request_trace', $this->payload($event));
     }
 
     /** @param array<string,mixed> $event */
@@ -49,12 +40,26 @@ final class RequestTraceLogger
     {
         $payload = [
             'schema' => self::SCHEMA,
-            'timestamp' => gmdate(DATE_ATOM),
         ];
 
         foreach (['request_id', 'transport', 'phase', 'session', 'account', 'status', 'classification'] as $key) {
             if (array_key_exists($key, $event)) {
                 $payload[$key] = is_string($event[$key]) ? $this->redact($event[$key]) : $event[$key];
+            }
+        }
+        if (isset($event['attempts']) && is_int($event['attempts']) && $event['attempts'] > 0) {
+            $payload['attempts'] = $event['attempts'];
+        }
+        if (isset($event['timings_ms']) && is_array($event['timings_ms'])) {
+            $timings = [];
+            foreach ($event['timings_ms'] as $key => $value) {
+                if (!is_string($key) || $key === '' || (!is_int($value) && !is_float($value))) {
+                    continue;
+                }
+                $timings[$key] = round((float) $value, 3);
+            }
+            if ($timings !== []) {
+                $payload['timings_ms'] = $timings;
             }
         }
 
@@ -123,24 +128,5 @@ final class RequestTraceLogger
         }
 
         return substr($value, 0, self::MAX_MESSAGE_LENGTH) . '... [truncated]';
-    }
-
-    private function ensureTraceDir(): void
-    {
-        if (is_dir($this->traceDir)) {
-            return;
-        }
-        if (!mkdir($this->traceDir, 0700, true) && !is_dir($this->traceDir)) {
-            throw new RuntimeException('Failed to create trace dir: ' . $this->traceDir);
-        }
-    }
-
-    private function timestampForFilename(): string
-    {
-        $microtime = microtime(true);
-        $seconds = (int) $microtime;
-        $micros = (int) (($microtime - $seconds) * 1_000_000);
-
-        return gmdate('Ymd-His', $seconds) . sprintf('-%06d', $micros);
     }
 }

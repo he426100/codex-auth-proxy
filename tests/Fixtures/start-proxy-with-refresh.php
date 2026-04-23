@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use CodexAuthProxy\Auth\TokenRefresher;
+use CodexAuthProxy\Logging\LoggerFactory;
 use CodexAuthProxy\Observability\RequestTraceLogger;
 use CodexAuthProxy\Proxy\CodexProxyServer;
 use GuzzleHttp\Client;
@@ -12,6 +13,10 @@ use GuzzleHttp\Psr7\Response;
 use Psr\Log\NullLogger;
 
 require dirname(__DIR__, 2) . '/vendor/autoload.php';
+
+if (!defined('BASE_PATH')) {
+    define('BASE_PATH', dirname(__DIR__, 2));
+}
 
 $proxyPort = (int) ($argv[1] ?? 0);
 $upstreamPort = (int) ($argv[2] ?? 0);
@@ -48,5 +53,5 @@ $http = new Client([
     upstreamBase: "http://127.0.0.1:{$upstreamPort}",
     logger: new NullLogger(),
     tokenRefresher: new TokenRefresher($http),
-    requestTraceLogger: new RequestTraceLogger($home . '/traces'),
+    requestTraceLogger: new RequestTraceLogger(LoggerFactory::createTrace($home . '/logs/trace.jsonl')),
 ))->start();

@@ -205,7 +205,7 @@ bin/codex-auth-proxy serve --port=1456
 
 ## 配置项
 
-运行时默认值保存在 `config/defaults.php`。配置文件内部使用类似 Hyperf 的 `env('NAME', $default)` 方式读取项目环境变量。需要本地覆盖时，可以复制 `.env.example` 为 `.env`；`.env` 是本地文件，不应提交。默认会读取项目旁边的 `.env`；使用 PHAR 或需要显式配置文件时，可设置 `CODEX_AUTH_PROXY_DOTENV_FILE=/path/to/.env`。
+需要本地覆盖时，可以复制 `.env.example` 为 `.env`；`.env` 是本地文件，不应提交。默认会读取项目旁边的 `.env`；使用 PHAR 或需要显式配置文件时，可设置 `CODEX_AUTH_PROXY_DOTENV_FILE=/path/to/.env`。
 
 运行时配置可以通过命令暴露的 CLI 参数，或 `CODEX_AUTH_PROXY_*` `.env` 变量覆盖：
 
@@ -218,11 +218,14 @@ CODEX_AUTH_PROXY_CALLBACK_PORT=1455
 CODEX_AUTH_PROXY_CALLBACK_TIMEOUT_SECONDS=300
 CODEX_AUTH_PROXY_ACCOUNTS_DIR=/home/me/.config/codex-auth-proxy/accounts
 CODEX_AUTH_PROXY_STATE_FILE=/home/me/.config/codex-auth-proxy/state.json
-CODEX_AUTH_PROXY_LOG_LEVEL=warning
 CODEX_AUTH_PROXY_CODEX_USER_AGENT="codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0"
 CODEX_AUTH_PROXY_CODEX_BETA_FEATURES=multi_agent
-CODEX_AUTH_PROXY_TRACE_DIR=/home/me/.config/codex-auth-proxy/traces
+CODEX_AUTH_PROXY_LOG_FILE=
+CODEX_AUTH_PROXY_LOG_LEVEL=warning
+CODEX_AUTH_PROXY_TRACE_FILE=
+CODEX_AUTH_PROXY_TRACE_LEVEL=info
 CODEX_AUTH_PROXY_TRACE_MUTATIONS=true
+CODEX_AUTH_PROXY_TRACE_TIMINGS=false
 CODEX_AUTH_PROXY_HTTP_PROXY=http://127.0.0.1:7890
 CODEX_AUTH_PROXY_HTTPS_PROXY=http://127.0.0.1:7890
 CODEX_AUTH_PROXY_NO_PROXY=localhost,127.0.0.1,::1
@@ -234,7 +237,7 @@ CODEX_AUTH_PROXY_NO_PROXY=localhost,127.0.0.1,::1
 
 `CODEX_AUTH_PROXY_NO_PROXY` 支持精确 host/IP、`localhost`、loopback 地址、带端口的 host、`*`，以及 `openai.com` 或 `.openai.com` 形式的域名后缀匹配。
 
-当上游 HTTP/WebSocket 出错时，`serve` 会向 `CODEX_AUTH_PROXY_TRACE_DIR` 写入脱敏 JSON trace。`CODEX_AUTH_PROXY_TRACE_MUTATIONS=true` 时，代理执行 Codex 兼容改写也会写入 `request_normalized` trace，内容只包含 `parameters.empty_array_to_object` 这类 mutation 名称，不保存 prompt 内容。错误 trace 文件包含 request id、传输类型、阶段、session key、账号名、状态码和脱敏错误摘要；不会保存完整 OAuth token 或原始 authorization header。
+`CODEX_AUTH_PROXY_LOG_FILE` 和 `CODEX_AUTH_PROXY_TRACE_FILE` 留空时，源码运行会把日志写到项目根目录下的 `runtime/logs`，PHAR 运行会写到 `.phar` 同目录下的 `runtime/logs`。开启 `CODEX_AUTH_PROXY_TRACE_MUTATIONS=true` 可记录兼容改写事件，开启 `CODEX_AUTH_PROXY_TRACE_TIMINGS=true` 可记录请求耗时。trace 不保存 prompt 内容、OAuth token 和原始 authorization header。
 
 如果 `serve` 日志里出现 upstream WebSocket 或 HTTPS `status -1`，说明 Swoole client 没有拿到上游 HTTP 响应。当前网络不能直连 `chatgpt.com` 时，需要把 `CODEX_AUTH_PROXY_HTTPS_PROXY` 设置为支持的代理 URL，例如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:7890`。不要给 `serve` 配置 `https://` 代理 URL；Swoole 上游转发只支持 HTTP 和 SOCKS5 proxy 配置。
 

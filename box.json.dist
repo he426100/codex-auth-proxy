@@ -1,5 +1,9 @@
 {
   "output": "build/codex-auth-proxy.phar",
+  "files": [
+    "config/defaults.php",
+    "config/logger.php"
+  ],
   "blacklist": [
     ".git",
     ".github",

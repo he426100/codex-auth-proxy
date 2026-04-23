@@ -176,7 +176,7 @@ final class CodexProxyServerIntegrationTest extends TestCase
             self::assertSame(502, $response->getStatusCode());
             self::assertStringContainsString('HTTP request failed', (string) $response->getBody());
 
-            $trace = $this->waitForTrace($home . '/traces', 'upstream_response');
+            $trace = $this->waitForTrace($home . '/logs/trace.jsonl', 'upstream_response');
             self::assertSame('http', $trace['transport']);
             self::assertSame('upstream_response', $trace['phase']);
             self::assertSame(502, $trace['status']);
@@ -230,6 +230,62 @@ final class CodexProxyServerIntegrationTest extends TestCase
             self::assertSame('acct-gamma', $state['sessions']['x-codex-turn-state:turn-retry-all']);
             self::assertGreaterThan(time(), $state['accounts']['acct-alpha']['cooldown_until']);
             self::assertGreaterThan(time(), $state['accounts']['acct-beta']['cooldown_until']);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testWritesTimingTraceForCompletedHttpRequest(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-http-timing');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-request.json';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home, 'true'], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $http = new GuzzleClient(['http_errors' => false, 'timeout' => 5]);
+            $response = $http->post("http://127.0.0.1:{$proxyPort}/v1/responses/compact", [
+                'headers' => [
+                    'Content-Type' => 'application/json',
+                    'X-Request-Id' => 'integration-http-timing',
+                ],
+                'body' => '{"input":"hello"}',
+            ]);
+
+            self::assertSame(200, $response->getStatusCode());
+
+            $trace = $this->waitForTrace($home . '/logs/trace.jsonl', 'request_completed');
+            self::assertSame('http', $trace['transport']);
+            self::assertSame('request_completed', $trace['phase']);
+            self::assertSame('alpha', $trace['account']);
+            self::assertSame(200, $trace['status']);
+            self::assertSame('none', $trace['classification']);
+            self::assertSame(1, $trace['attempts']);
+            self::assertArrayHasKey('timings_ms', $trace);
+            self::assertArrayHasKey('scheduler_reload', $trace['timings_ms']);
+            self::assertArrayHasKey('account_prepare', $trace['timings_ms']);
+            self::assertArrayHasKey('upstream', $trace['timings_ms']);
+            self::assertArrayHasKey('total', $trace['timings_ms']);
+            self::assertGreaterThanOrEqual(0, $trace['timings_ms']['scheduler_reload']);
+            self::assertGreaterThanOrEqual(0, $trace['timings_ms']['account_prepare']);
+            self::assertGreaterThan(0, $trace['timings_ms']['upstream']);
+            self::assertGreaterThan(0, $trace['timings_ms']['total']);
+            self::assertGreaterThanOrEqual($trace['timings_ms']['upstream'], $trace['timings_ms']['total']);
         } finally {
             $this->stopProcess($proxy ?? null);
             $this->stopProcess($upstream ?? null);
@@ -637,12 +693,74 @@ final class CodexProxyServerIntegrationTest extends TestCase
             });
 
             self::assertStringContainsString('usage_limit_reached', (string) $payload);
-            $trace = $this->waitForTrace($home . '/traces', 'upstream_error');
+            $trace = $this->waitForTrace($home . '/logs/trace.jsonl', 'upstream_error');
             self::assertSame('websocket', $trace['transport']);
             self::assertSame('upstream_error', $trace['phase']);
             self::assertSame('alpha', $trace['account']);
             self::assertSame('quota', $trace['classification']);
             self::assertStringContainsString('usage_limit_reached', $trace['message']);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testWritesTimingTraceForOpenedWebSocket(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-timing');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-websocket-request.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-done-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home, 'true'], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $payload = null;
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$payload): void {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $client->set(['timeout' => 5]);
+                if (!$client->upgrade('/v1/responses')) {
+                    $payload = 'upgrade failed: ' . (string) $client->errCode;
+                    $client->close();
+                    return;
+                }
+
+                $client->push('{"input":"hello"}');
+                $frame = $client->recv(5);
+                $payload = is_object($frame) && property_exists($frame, 'data') ? (string) $frame->data : (string) $frame;
+                $client->close();
+            });
+
+            self::assertStringContainsString('response.completed', (string) $payload);
+
+            $trace = $this->waitForTrace($home . '/logs/trace.jsonl', 'websocket_opened');
+            self::assertSame('websocket', $trace['transport']);
+            self::assertSame('websocket_opened', $trace['phase']);
+            self::assertSame('alpha', $trace['account']);
+            self::assertSame(101, $trace['status']);
+            self::assertSame('none', $trace['classification']);
+            self::assertSame(1, $trace['attempts']);
+            self::assertArrayHasKey('timings_ms', $trace);
+            self::assertArrayHasKey('scheduler_reload', $trace['timings_ms']);
+            self::assertArrayHasKey('account_prepare', $trace['timings_ms']);
+            self::assertArrayHasKey('upstream_upgrade', $trace['timings_ms']);
+            self::assertArrayHasKey('total', $trace['timings_ms']);
+            self::assertGreaterThanOrEqual(0, $trace['timings_ms']['scheduler_reload']);
+            self::assertGreaterThanOrEqual(0, $trace['timings_ms']['account_prepare']);
+            self::assertGreaterThan(0, $trace['timings_ms']['upstream_upgrade']);
+            self::assertGreaterThan(0, $trace['timings_ms']['total']);
         } finally {
             $this->stopProcess($proxy ?? null);
             $this->stopProcess($upstream ?? null);
@@ -1107,25 +1225,32 @@ final class CodexProxyServerIntegrationTest extends TestCase
     }
 
     /** @return array<string,mixed> */
-    private function waitForTrace(string $dir, ?string $phase = null): array
+    private function waitForTrace(string $path, ?string $phase = null): array
     {
         $deadline = microtime(true) + 5.0;
         do {
-            $files = glob($dir . '/*.json') ?: [];
-            foreach ($files as $file) {
-                $data = json_decode((string) file_get_contents($file), true, flags: JSON_THROW_ON_ERROR);
-                if (is_array($data)) {
-                    if ($phase !== null && ($data['phase'] ?? null) !== $phase) {
+            if (is_file($path)) {
+                $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+                foreach ($lines as $line) {
+                    $record = json_decode($line, true, flags: JSON_THROW_ON_ERROR);
+                    if (!is_array($record)) {
+                        continue;
+                    }
+                    $context = $record['context'] ?? null;
+                    if (!is_array($context)) {
+                        continue;
+                    }
+                    if ($phase !== null && ($context['phase'] ?? null) !== $phase) {
                         continue;
                     }
 
-                    return $data;
+                    return $context;
                 }
             }
             usleep(50_000);
         } while (microtime(true) < $deadline);
 
-        self::fail('Timed out waiting for trace in: ' . $dir . ($phase !== null ? ' phase=' . $phase : ''));
+        self::fail('Timed out waiting for trace in: ' . $path . ($phase !== null ? ' phase=' . $phase : ''));
     }
 
     /** @param list<string> $command */

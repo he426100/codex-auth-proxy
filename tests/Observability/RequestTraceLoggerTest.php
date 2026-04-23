@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CodexAuthProxy\Tests\Observability;
 
+use CodexAuthProxy\Logging\LoggerFactory;
 use CodexAuthProxy\Observability\RequestTraceLogger;
 use CodexAuthProxy\Tests\TestCase;
 
@@ -11,8 +12,7 @@ final class RequestTraceLoggerTest extends TestCase
 {
     public function testWritesRedactedErrorTrace(): void
     {
-        $dir = $this->tempDir('trace');
-        $logger = new RequestTraceLogger($dir);
+        [$path, $logger] = $this->traceLogger('trace');
 
         $logger->error([
             'request_id' => 'abc123ef',
@@ -24,40 +24,38 @@ final class RequestTraceLoggerTest extends TestCase
             'message' => 'Authorization: Bearer secret-token refresh_token=rt_secret',
         ]);
 
-        $files = glob($dir . '/*.json') ?: [];
-        self::assertCount(1, $files);
-        self::assertStringContainsString('abc123ef', basename($files[0]));
-
-        $payload = json_decode((string) file_get_contents($files[0]), true, flags: JSON_THROW_ON_ERROR);
-        self::assertSame('codex-auth-proxy.trace.v1', $payload['schema']);
-        self::assertSame('abc123ef', $payload['request_id']);
-        self::assertSame('http', $payload['transport']);
-        self::assertSame('upstream_response', $payload['phase']);
-        self::assertSame('session-a', $payload['session']);
-        self::assertSame('account-a', $payload['account']);
-        self::assertSame(401, $payload['status']);
-        self::assertStringNotContainsString('secret-token', $payload['message']);
-        self::assertStringNotContainsString('rt_secret', $payload['message']);
-        self::assertStringContainsString('Bearer [redacted]', $payload['message']);
-        self::assertStringContainsString('refresh_token=[redacted]', $payload['message']);
+        $records = $this->traceRecords($path);
+        self::assertCount(1, $records);
+        self::assertSame('request_trace_error', $records[0]['message']);
+        self::assertSame('WARNING', $records[0]['level_name']);
+        self::assertSame('codex-auth-proxy.trace', $records[0]['channel']);
+        self::assertSame('codex-auth-proxy.trace.v1', $records[0]['context']['schema']);
+        self::assertSame('abc123ef', $records[0]['context']['request_id']);
+        self::assertSame('http', $records[0]['context']['transport']);
+        self::assertSame('upstream_response', $records[0]['context']['phase']);
+        self::assertSame('session-a', $records[0]['context']['session']);
+        self::assertSame('account-a', $records[0]['context']['account']);
+        self::assertSame(401, $records[0]['context']['status']);
+        self::assertStringNotContainsString('secret-token', $records[0]['context']['message']);
+        self::assertStringNotContainsString('rt_secret', $records[0]['context']['message']);
+        self::assertStringContainsString('Bearer [redacted]', $records[0]['context']['message']);
+        self::assertStringContainsString('refresh_token=[redacted]', $records[0]['context']['message']);
     }
 
-    public function testDoesNotOverwriteMultipleErrorsForSameRequest(): void
+    public function testAppendsMultipleErrorsIntoSingleTraceFile(): void
     {
-        $dir = $this->tempDir('trace-multiple');
-        $logger = new RequestTraceLogger($dir);
+        [$path, $logger] = $this->traceLogger('trace-multiple');
 
         $logger->error(['request_id' => 'same-id', 'message' => 'first']);
         $logger->error(['request_id' => 'same-id', 'message' => 'second']);
 
-        $files = glob($dir . '/*.json') ?: [];
-        self::assertCount(2, $files);
+        self::assertSame([$path], glob(dirname($path) . '/*') ?: []);
+        self::assertCount(2, $this->traceRecords($path));
     }
 
     public function testRedactsPromptContentFromJsonErrorBody(): void
     {
-        $dir = $this->tempDir('trace-content');
-        $logger = new RequestTraceLogger($dir);
+        [$path, $logger] = $this->traceLogger('trace-content');
 
         $logger->error([
             'request_id' => 'content-redaction',
@@ -74,19 +72,16 @@ final class RequestTraceLoggerTest extends TestCase
             ], JSON_THROW_ON_ERROR),
         ]);
 
-        $files = glob($dir . '/*.json') ?: [];
-        self::assertCount(1, $files);
-
-        $payload = json_decode((string) file_get_contents($files[0]), true, flags: JSON_THROW_ON_ERROR);
-        self::assertSame('{"error":{"message":"invalid request"},"input":"[redacted]","output":"[redacted]"}', $payload['message']);
-        self::assertStringNotContainsString('secret prompt', $payload['message']);
-        self::assertStringNotContainsString('source code secret', $payload['message']);
+        $records = $this->traceRecords($path);
+        self::assertCount(1, $records);
+        self::assertSame('{"error":{"message":"invalid request"},"input":"[redacted]","output":"[redacted]"}', $records[0]['context']['message']);
+        self::assertStringNotContainsString('secret prompt', $records[0]['context']['message']);
+        self::assertStringNotContainsString('source code secret', $records[0]['context']['message']);
     }
 
     public function testWritesMutationTraceWithoutPromptContent(): void
     {
-        $dir = $this->tempDir('trace-mutations');
-        $logger = new RequestTraceLogger($dir);
+        [$path, $logger] = $this->traceLogger('trace-mutations');
 
         $logger->event([
             'request_id' => 'mutation-1',
@@ -100,15 +95,71 @@ final class RequestTraceLoggerTest extends TestCase
             'message' => '{"input":"secret prompt"}',
         ]);
 
-        $files = glob($dir . '/*.json') ?: [];
-        self::assertCount(1, $files);
-
-        $payload = json_decode((string) file_get_contents($files[0]), true, flags: JSON_THROW_ON_ERROR);
-        self::assertSame('request_normalized', $payload['phase']);
+        $records = $this->traceRecords($path);
+        self::assertCount(1, $records);
+        self::assertSame('request_trace', $records[0]['message']);
+        self::assertSame('INFO', $records[0]['level_name']);
+        self::assertSame('request_normalized', $records[0]['context']['phase']);
         self::assertSame([
             'http.input.string_to_message',
             'parameters.empty_array_to_object',
-        ], $payload['mutations']);
-        self::assertStringNotContainsString('secret prompt', $payload['message']);
+        ], $records[0]['context']['mutations']);
+        self::assertStringNotContainsString('secret prompt', $records[0]['context']['message']);
+    }
+
+    public function testWritesTimingMetricsForRequestEvents(): void
+    {
+        [$path, $logger] = $this->traceLogger('trace-timings');
+
+        $logger->event([
+            'request_id' => 'timing-1',
+            'transport' => 'http',
+            'phase' => 'request_completed',
+            'status' => 200,
+            'classification' => 'none',
+            'attempts' => 2,
+            'timings_ms' => [
+                'scheduler_reload' => 1.23456,
+                'account_prepare' => 2.34567,
+                'upstream' => 123.45678,
+                'first_byte' => 45.67891,
+                'total' => 130.00049,
+                'ignore_string' => 'x',
+            ],
+        ]);
+
+        $records = $this->traceRecords($path);
+        self::assertCount(1, $records);
+        self::assertSame(2, $records[0]['context']['attempts']);
+        self::assertSame([
+            'scheduler_reload' => 1.235,
+            'account_prepare' => 2.346,
+            'upstream' => 123.457,
+            'first_byte' => 45.679,
+            'total' => 130.0,
+        ], $records[0]['context']['timings_ms']);
+    }
+
+    /** @return array{0:string,1:RequestTraceLogger} */
+    private function traceLogger(string $name): array
+    {
+        $path = $this->tempDir($name) . '/trace.jsonl';
+
+        return [$path, new RequestTraceLogger(LoggerFactory::createTrace($path))];
+    }
+
+    /** @return list<array<string,mixed>> */
+    private function traceRecords(string $path): array
+    {
+        if (!is_file($path)) {
+            return [];
+        }
+
+        $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+
+        return array_map(
+            static fn (string $line): array => json_decode($line, true, flags: JSON_THROW_ON_ERROR),
+            $lines,
+        );
     }
 }

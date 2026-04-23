@@ -7,6 +7,7 @@ namespace CodexAuthProxy\Tests\Proxy;
 use CodexAuthProxy\Account\AccountFileValidator;
 use CodexAuthProxy\Account\AccountRepository;
 use CodexAuthProxy\Config\AppConfig;
+use CodexAuthProxy\Logging\LoggerFactory;
 use CodexAuthProxy\Network\OutboundProxyConfig;
 use CodexAuthProxy\Observability\RequestTraceLogger;
 use CodexAuthProxy\Proxy\CodexProxyServer;
@@ -92,14 +93,14 @@ final class CodexProxyServerTest extends TestCase
 
     public function testRecordsTraceForUpstreamError(): void
     {
-        $traceDir = $this->tempDir('proxy-trace');
+        [$traceFile, $traceLogger] = $this->traceLogger('proxy-trace');
         $server = new CodexProxyServer(
             host: '127.0.0.1',
             port: 1456,
             accountsDir: '/tmp/accounts',
             stateFile: '/tmp/state.json',
             defaultCooldownSeconds: 18000,
-            requestTraceLogger: new RequestTraceLogger($traceDir),
+            requestTraceLogger: $traceLogger,
         );
 
         $method = new ReflectionMethod(CodexProxyServer::class, 'traceUpstreamError');
@@ -115,27 +116,26 @@ final class CodexProxyServerTest extends TestCase
             'quota',
         );
 
-        $files = glob($traceDir . '/*.json') ?: [];
-        self::assertCount(1, $files);
-        $payload = json_decode((string) file_get_contents($files[0]), true, flags: JSON_THROW_ON_ERROR);
-        self::assertSame('req12345', $payload['request_id']);
-        self::assertSame('session-a', $payload['session']);
-        self::assertSame('alpha', $payload['account']);
-        self::assertSame(429, $payload['status']);
-        self::assertSame('quota', $payload['classification']);
-        self::assertStringNotContainsString('secret-token', $payload['message']);
+        $records = $this->traceRecords($traceFile);
+        self::assertCount(1, $records);
+        self::assertSame('req12345', $records[0]['context']['request_id']);
+        self::assertSame('session-a', $records[0]['context']['session']);
+        self::assertSame('alpha', $records[0]['context']['account']);
+        self::assertSame(429, $records[0]['context']['status']);
+        self::assertSame('quota', $records[0]['context']['classification']);
+        self::assertStringNotContainsString('secret-token', $records[0]['context']['message']);
     }
 
     public function testRecordsTraceForWebSocketStreamError(): void
     {
-        $traceDir = $this->tempDir('proxy-websocket-trace');
+        [$traceFile, $traceLogger] = $this->traceLogger('proxy-websocket-trace');
         $server = new CodexProxyServer(
             host: '127.0.0.1',
             port: 1456,
             accountsDir: '/tmp/accounts',
             stateFile: '/tmp/state.json',
             defaultCooldownSeconds: 18000,
-            requestTraceLogger: new RequestTraceLogger($traceDir),
+            requestTraceLogger: $traceLogger,
         );
 
         $method = new ReflectionMethod(CodexProxyServer::class, 'traceWebSocketStreamError');
@@ -148,28 +148,27 @@ final class CodexProxyServerTest extends TestCase
             new ErrorClassifier(18000),
         );
 
-        $files = glob($traceDir . '/*.json') ?: [];
-        self::assertCount(1, $files);
-        $payload = json_decode((string) file_get_contents($files[0]), true, flags: JSON_THROW_ON_ERROR);
-        self::assertSame('req-ws', $payload['request_id']);
-        self::assertSame('websocket', $payload['transport']);
-        self::assertSame('upstream_error', $payload['phase']);
-        self::assertSame('session-ws', $payload['session']);
-        self::assertSame('alpha', $payload['account']);
-        self::assertSame(200, $payload['status']);
-        self::assertSame('quota', $payload['classification']);
+        $records = $this->traceRecords($traceFile);
+        self::assertCount(1, $records);
+        self::assertSame('req-ws', $records[0]['context']['request_id']);
+        self::assertSame('websocket', $records[0]['context']['transport']);
+        self::assertSame('upstream_error', $records[0]['context']['phase']);
+        self::assertSame('session-ws', $records[0]['context']['session']);
+        self::assertSame('alpha', $records[0]['context']['account']);
+        self::assertSame(200, $records[0]['context']['status']);
+        self::assertSame('quota', $records[0]['context']['classification']);
     }
 
     public function testRecordsTraceForPayloadMutations(): void
     {
-        $traceDir = $this->tempDir('proxy-mutation-trace');
+        [$traceFile, $traceLogger] = $this->traceLogger('proxy-mutation-trace');
         $server = new CodexProxyServer(
             host: '127.0.0.1',
             port: 1456,
             accountsDir: '/tmp/accounts',
             stateFile: '/tmp/state.json',
             defaultCooldownSeconds: 18000,
-            requestTraceLogger: new RequestTraceLogger($traceDir),
+            requestTraceLogger: $traceLogger,
         );
 
         $method = new ReflectionMethod(CodexProxyServer::class, 'tracePayloadMutations');
@@ -181,26 +180,25 @@ final class CodexProxyServerTest extends TestCase
             ['http.input.string_to_message'],
         );
 
-        $files = glob($traceDir . '/*.json') ?: [];
-        self::assertCount(1, $files);
-        $payload = json_decode((string) file_get_contents($files[0]), true, flags: JSON_THROW_ON_ERROR);
-        self::assertSame('req-mutation', $payload['request_id']);
-        self::assertSame('http', $payload['transport']);
-        self::assertSame('request_normalized', $payload['phase']);
-        self::assertSame('session-mutation', $payload['session']);
-        self::assertSame(['http.input.string_to_message'], $payload['mutations']);
+        $records = $this->traceRecords($traceFile);
+        self::assertCount(1, $records);
+        self::assertSame('req-mutation', $records[0]['context']['request_id']);
+        self::assertSame('http', $records[0]['context']['transport']);
+        self::assertSame('request_normalized', $records[0]['context']['phase']);
+        self::assertSame('session-mutation', $records[0]['context']['session']);
+        self::assertSame(['http.input.string_to_message'], $records[0]['context']['mutations']);
     }
 
     public function testSkipsTraceForPayloadMutationsWhenDisabled(): void
     {
-        $traceDir = $this->tempDir('proxy-mutation-trace-disabled');
+        [$traceFile, $traceLogger] = $this->traceLogger('proxy-mutation-trace-disabled');
         $server = new CodexProxyServer(
             host: '127.0.0.1',
             port: 1456,
             accountsDir: '/tmp/accounts',
             stateFile: '/tmp/state.json',
             defaultCooldownSeconds: 18000,
-            requestTraceLogger: new RequestTraceLogger($traceDir),
+            requestTraceLogger: $traceLogger,
             traceMutations: false,
         );
 
@@ -213,7 +211,80 @@ final class CodexProxyServerTest extends TestCase
             ['http.input.string_to_message'],
         );
 
-        self::assertSame([], glob($traceDir . '/*.json') ?: []);
+        self::assertSame([], $this->traceRecords($traceFile));
+    }
+
+    public function testRecordsTraceForRequestTimingsWhenEnabled(): void
+    {
+        [$traceFile, $traceLogger] = $this->traceLogger('proxy-timing-trace');
+        $server = new CodexProxyServer(
+            host: '127.0.0.1',
+            port: 1456,
+            accountsDir: '/tmp/accounts',
+            stateFile: '/tmp/state.json',
+            defaultCooldownSeconds: 18000,
+            requestTraceLogger: $traceLogger,
+            traceTimings: true,
+        );
+
+        $method = new ReflectionMethod(CodexProxyServer::class, 'traceRequestTiming');
+        $method->invoke(
+            $server,
+            'req-timing',
+            'http',
+            'request_completed',
+            new SessionKey('session-timing'),
+            $this->account('alpha'),
+            200,
+            'none',
+            2,
+            [
+                'scheduler_reload' => 1.25,
+                'account_prepare' => 3.5,
+                'upstream' => 120.75,
+                'first_byte' => 45.5,
+                'total' => 130.25,
+            ],
+            null,
+        );
+
+        $records = $this->traceRecords($traceFile);
+        self::assertCount(1, $records);
+        self::assertSame('request_completed', $records[0]['context']['phase']);
+        self::assertSame(2, $records[0]['context']['attempts']);
+        self::assertSame(120.75, $records[0]['context']['timings_ms']['upstream']);
+        self::assertSame(130.25, $records[0]['context']['timings_ms']['total']);
+    }
+
+    public function testSkipsTraceForRequestTimingsWhenDisabled(): void
+    {
+        [$traceFile, $traceLogger] = $this->traceLogger('proxy-timing-trace-disabled');
+        $server = new CodexProxyServer(
+            host: '127.0.0.1',
+            port: 1456,
+            accountsDir: '/tmp/accounts',
+            stateFile: '/tmp/state.json',
+            defaultCooldownSeconds: 18000,
+            requestTraceLogger: $traceLogger,
+            traceTimings: false,
+        );
+
+        $method = new ReflectionMethod(CodexProxyServer::class, 'traceRequestTiming');
+        $method->invoke(
+            $server,
+            'req-timing-disabled',
+            'http',
+            'request_completed',
+            new SessionKey('session-timing-disabled'),
+            $this->account('alpha'),
+            200,
+            'none',
+            1,
+            ['total' => 100.0],
+            null,
+        );
+
+        self::assertSame([], $this->traceRecords($traceFile));
     }
 
     public function testReloadsSchedulerAccountsFromDisk(): void
@@ -327,6 +398,29 @@ final class CodexProxyServerTest extends TestCase
         );
     }
 
+    /** @return array{0:string,1:RequestTraceLogger} */
+    private function traceLogger(string $name): array
+    {
+        $path = $this->tempDir($name) . '/trace.jsonl';
+
+        return [$path, new RequestTraceLogger(LoggerFactory::createTrace($path))];
+    }
+
+    /** @return list<array<string,mixed>> */
+    private function traceRecords(string $path): array
+    {
+        if (!is_file($path)) {
+            return [];
+        }
+
+        $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+
+        return array_map(
+            static fn (string $line): array => json_decode($line, true, flags: JSON_THROW_ON_ERROR),
+            $lines,
+        );
+    }
+
     private function config(?string $httpProxy, ?string $httpsProxy, string $noProxy): AppConfig
     {
         return new AppConfig(
@@ -339,11 +433,10 @@ final class CodexProxyServerTest extends TestCase
             callbackHost: 'localhost',
             callbackPort: 1455,
             callbackTimeoutSeconds: 300,
-            logLevel: 'warning',
             codexUserAgent: 'ua',
             codexBetaFeatures: 'multi_agent',
-            traceDir: '/tmp/traces',
             traceMutations: true,
+            traceTimings: false,
             httpProxy: $httpProxy,
             httpsProxy: $httpsProxy,
             noProxy: $noProxy,

@@ -12,11 +12,13 @@ use CodexAuthProxy\Console\Command\ExportCommand;
 use CodexAuthProxy\Console\Command\ImportCommand;
 use CodexAuthProxy\Console\Command\LoginCommand;
 use CodexAuthProxy\Console\Command\ServeCommand;
+use CodexAuthProxy\Logging\LoggerConfigLoader;
 use CodexAuthProxy\Logging\LoggerFactory;
 use CodexAuthProxy\OAuth\CallbackServer;
 use CodexAuthProxy\OAuth\CodexOAuthClient;
 use CodexAuthProxy\OAuth\CodexOAuthHttpClient;
 use CodexAuthProxy\Network\OutboundProxyConfig;
+use CodexAuthProxy\Observability\RequestTraceLogger;
 use CodexAuthProxy\OAuth\LoopbackCallbackServer;
 use CodexAuthProxy\Usage\UsageClient;
 use GuzzleHttp\Client;
@@ -31,23 +33,27 @@ final class Application extends SymfonyApplication
         ?CodexOAuthClient $oauthClient = null,
         ?CallbackServer $callbackServer = null,
         ?AppConfigLoader $configLoader = null,
+        ?LoggerConfigLoader $loggerConfigLoader = null,
         ?UsageClient $usageClient = null,
     ) {
         parent::__construct('codex-auth-proxy', '0.1.0');
 
         $configLoader ??= new AppConfigLoader($home);
+        $loggerConfigLoader ??= new LoggerConfigLoader();
         $config = $configLoader->load();
+        $loggerConfig = $loggerConfigLoader->load();
         $outboundProxyConfig = OutboundProxyConfig::fromAppConfig($config);
-        $logger ??= LoggerFactory::create($config->logLevel);
+        $logger ??= LoggerFactory::create($loggerConfig, 'default');
         $oauthClient ??= new CodexOAuthHttpClient(new Client(['timeout' => 30]), $outboundProxyConfig->guzzleProxy());
         $callbackServer ??= new LoopbackCallbackServer();
+        $requestTraceLogger = new RequestTraceLogger(LoggerFactory::create($loggerConfig, 'trace'));
 
         $this->add(new AccountsCommand($configLoader, $usageClient));
         $this->add(new ImportCommand($configLoader));
         $this->add(new ExportCommand($configLoader));
         $this->add(new DoctorCommand($configLoader));
         $this->add(new ConfigCommand($configLoader));
-        $this->add(new ServeCommand($configLoader, $logger));
+        $this->add(new ServeCommand($configLoader, $logger, $requestTraceLogger));
         $this->add(new LoginCommand($configLoader, $oauthClient, $callbackServer));
     }
 }

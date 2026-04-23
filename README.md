@@ -149,7 +149,7 @@ The proxy supports Codex HTTP/SSE and WebSocket requests. Requests are mapped fr
 
 ## Configuration
 
-Runtime defaults live in `config/defaults.php`. The config file reads project environment variables with `env('NAME', $default)`, similar to Hyperf-style config files. Copy `.env.example` to `.env` when you need local overrides; `.env` is optional and is not committed. By default the loader reads the `.env` next to this project; set `CODEX_AUTH_PROXY_DOTENV_FILE=/path/to/.env` when running a PHAR or when you want an explicit config file.
+Copy `.env.example` to `.env` when you need local overrides. `.env` is optional and is not committed. By default the loader reads the `.env` next to this project; set `CODEX_AUTH_PROXY_DOTENV_FILE=/path/to/.env` when running a PHAR or when you want an explicit config file.
 
 Runtime defaults can be overridden with CLI options where a command exposes them, or with `CODEX_AUTH_PROXY_*` `.env` variables:
 
@@ -162,11 +162,14 @@ CODEX_AUTH_PROXY_CALLBACK_PORT=1455
 CODEX_AUTH_PROXY_CALLBACK_TIMEOUT_SECONDS=300
 CODEX_AUTH_PROXY_ACCOUNTS_DIR=/home/me/.config/codex-auth-proxy/accounts
 CODEX_AUTH_PROXY_STATE_FILE=/home/me/.config/codex-auth-proxy/state.json
-CODEX_AUTH_PROXY_LOG_LEVEL=warning
 CODEX_AUTH_PROXY_CODEX_USER_AGENT="codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0"
 CODEX_AUTH_PROXY_CODEX_BETA_FEATURES=multi_agent
-CODEX_AUTH_PROXY_TRACE_DIR=/home/me/.config/codex-auth-proxy/traces
+CODEX_AUTH_PROXY_LOG_FILE=
+CODEX_AUTH_PROXY_LOG_LEVEL=warning
+CODEX_AUTH_PROXY_TRACE_FILE=
+CODEX_AUTH_PROXY_TRACE_LEVEL=info
 CODEX_AUTH_PROXY_TRACE_MUTATIONS=true
+CODEX_AUTH_PROXY_TRACE_TIMINGS=false
 CODEX_AUTH_PROXY_HTTP_PROXY=http://127.0.0.1:7890
 CODEX_AUTH_PROXY_HTTPS_PROXY=http://127.0.0.1:7890
 CODEX_AUTH_PROXY_NO_PROXY=localhost,127.0.0.1,::1
@@ -178,7 +181,7 @@ Outbound proxy settings are applied to OAuth token exchange, token refresh, `ser
 
 `CODEX_AUTH_PROXY_NO_PROXY` supports exact hosts/IPs, `localhost`, loopback addresses, host values with ports, `*`, and suffix matching with either `openai.com` or `.openai.com`.
 
-When upstream HTTP/WebSocket errors occur, `serve` writes a redacted JSON trace to `CODEX_AUTH_PROXY_TRACE_DIR`. When `CODEX_AUTH_PROXY_TRACE_MUTATIONS=true`, Codex compatibility normalizations also write a `request_normalized` trace with mutation names such as `parameters.empty_array_to_object`; prompt content is not stored in mutation traces. Error trace files include request id, transport, phase, session key, account name, status, and a sanitized error summary; they do not store full OAuth tokens or raw authorization headers.
+When `CODEX_AUTH_PROXY_LOG_FILE` and `CODEX_AUTH_PROXY_TRACE_FILE` are left empty, source runs write logs to `runtime/logs` under the project root, and PHAR runs write logs to `runtime/logs` next to the `.phar` file. Set `CODEX_AUTH_PROXY_TRACE_MUTATIONS=true` to record normalization events, and `CODEX_AUTH_PROXY_TRACE_TIMINGS=true` to record request timing. Trace logs do not store prompt content, OAuth tokens, or raw authorization headers.
 
 If `serve` logs an upstream WebSocket or HTTPS failure with `status -1`, the Swoole client did not receive an upstream HTTP response. On networks that cannot connect to `chatgpt.com` directly, set `CODEX_AUTH_PROXY_HTTPS_PROXY` to a supported proxy URL such as `http://127.0.0.1:7890` or `socks5://127.0.0.1:7890`. Do not use an `https://` proxy URL for `serve`; Swoole upstream forwarding only supports HTTP and SOCKS5 proxy configuration.
 
