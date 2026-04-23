@@ -8,8 +8,32 @@ final class SessionKeyExtractor
 {
     public function extract(array $headers, string $body): SessionKey
     {
+        return $this->extractWithPriority(
+            $headers,
+            $body,
+            ['x-codex-turn-state', 'x-session-id', 'x-codex-session-id', 'x-codex-thread-id', 'openai-conversation-id', 'idempotency-key'],
+            ['conversation_id', 'thread_id', 'session_id', 'previous_response_id'],
+        );
+    }
+
+    public function extractExecutionSession(array $headers, string $body): SessionKey
+    {
+        return $this->extractWithPriority(
+            $headers,
+            $body,
+            ['x-session-id', 'x-codex-session-id', 'x-codex-thread-id', 'openai-conversation-id', 'idempotency-key', 'x-codex-turn-state'],
+            ['conversation_id', 'thread_id', 'session_id', 'previous_response_id'],
+        );
+    }
+
+    /**
+     * @param list<string> $headerKeys
+     * @param list<string> $bodyKeys
+     */
+    private function extractWithPriority(array $headers, string $body, array $headerKeys, array $bodyKeys): SessionKey
+    {
         $headers = $this->normalizeHeaders($headers);
-        foreach (['x-codex-turn-state', 'x-session-id', 'x-codex-session-id', 'x-codex-thread-id', 'openai-conversation-id', 'idempotency-key'] as $header) {
+        foreach ($headerKeys as $header) {
             $value = $headers[$header] ?? null;
             if (is_string($value) && trim($value) !== '') {
                 return new SessionKey($header . ':' . trim($value));
@@ -36,7 +60,7 @@ final class SessionKeyExtractor
             return new SessionKey('metadata.user_id:' . $metadataUserId);
         }
 
-        foreach (['conversation_id', 'thread_id', 'session_id', 'previous_response_id'] as $key) {
+        foreach ($bodyKeys as $key) {
             $value = $decoded[$key] ?? null;
             if (is_string($value) && trim($value) !== '') {
                 return new SessionKey($key . ':' . trim($value));

@@ -11,17 +11,12 @@ require dirname(__DIR__, 2) . '/vendor/autoload.php';
 
 $port = (int) ($argv[1] ?? 0);
 $captureFile = (string) ($argv[2] ?? '');
-/** @var mixed $disconnectArg */
-$disconnectArg = $argv[3] ?? false;
-$disconnectAfterResponse = match (strtolower((string) $disconnectArg)) {
-    '1', 'true', 'yes', 'on', 'close' => true,
-    default => false,
-};
 if ($port <= 0 || $captureFile === '') {
-    fwrite(STDERR, "usage: fake-websocket-done-upstream.php <port> <capture-file> [disconnect-after-response]\n");
+    fwrite(STDERR, "usage: fake-websocket-bootstrap-retry-upstream.php <port> <capture-file>\n");
     exit(2);
 }
 
+$attempts = 0;
 $server = new Server('127.0.0.1', $port, SWOOLE_BASE);
 $server->set([
     'worker_num' => 1,
@@ -37,14 +32,18 @@ $server->on('request', static function (Request $request, Response $response): v
     $response->status(404);
     $response->end('not found');
 });
-$server->on('message', static function (Server $server, Frame $frame) use ($captureFile, $disconnectAfterResponse): void {
+$server->on('message', static function (Server $server, Frame $frame) use (&$attempts, $captureFile): void {
+    $attempts++;
     file_put_contents($captureFile, json_encode([
+        'attempt' => $attempts,
         'payload' => (string) $frame->data,
     ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n", FILE_APPEND);
 
-    $server->push($frame->fd, '{"type":"response.done","response":{"id":"resp_ws_done"}}');
-    if ($disconnectAfterResponse) {
-        $server->disconnect($frame->fd, SWOOLE_WEBSOCKET_CLOSE_NORMAL, 'done');
+    if ($attempts === 1) {
+        $server->disconnect($frame->fd, \SWOOLE_WEBSOCKET_CLOSE_NORMAL, 'bootstrap read failure');
+        return;
     }
+
+    $server->push($frame->fd, '{"type":"response.completed","response":{"id":"resp_ws_bootstrap_retry"}}');
 });
 $server->start();

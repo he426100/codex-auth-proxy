@@ -1224,6 +1224,583 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
+    public function testRetriesWebSocketWhenUpstreamClosesBeforeAnyPayload(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-bootstrap-retry');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-websocket-request.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-bootstrap-retry-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $frames = [];
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$frames): void {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $client->set(['timeout' => 5]);
+                if (!$client->upgrade('/v1/responses')) {
+                    $frames[] = 'upgrade failed: ' . (string) $client->errCode;
+                    $client->close();
+                    return;
+                }
+
+                $client->push('{"input":"hello"}');
+                $frame = $client->recv(5);
+                if (is_object($frame) && property_exists($frame, 'data')) {
+                    $frames[] = (string) $frame->data;
+                } elseif ($frame !== false && $frame !== '') {
+                    $frames[] = (string) $frame;
+                }
+                $client->close();
+            });
+
+            self::assertNotSame([], $frames);
+            self::assertCount(1, $frames);
+            self::assertStringContainsString('resp_ws_bootstrap_retry', $frames[0]);
+            self::assertStringContainsString('"type":"response.completed"', $frames[0]);
+            self::assertStringNotContainsString('upstream_websocket_error', $frames[0]);
+
+            $attempts = $this->waitForJsonLines($captureFile, 2);
+            self::assertSame([
+                'input' => 'hello',
+                'type' => 'response.create',
+            ], json_decode($attempts[0]['payload'], true, flags: JSON_THROW_ON_ERROR));
+            self::assertSame([
+                'input' => 'hello',
+                'type' => 'response.create',
+            ], json_decode($attempts[1]['payload'], true, flags: JSON_THROW_ON_ERROR));
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testKeepsDownstreamWebSocketOpenAcrossSequentialRequests(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-sequential');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-websocket-request.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-done-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $result = [
+                'frames' => [],
+                'second_push' => null,
+            ];
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$result): void {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $client->set(['timeout' => 5]);
+                if (!$client->upgrade('/v1/responses')) {
+                    $result['frames'][] = 'upgrade failed: ' . (string) $client->errCode;
+                    $client->close();
+                    return;
+                }
+
+                $client->push('{"input":"hello 1"}');
+                $first = $client->recv(5);
+                if (is_object($first) && property_exists($first, 'data')) {
+                    $result['frames'][] = (string) $first->data;
+                } elseif ($first !== false && $first !== '') {
+                    $result['frames'][] = (string) $first;
+                }
+
+                $result['second_push'] = $client->push('{"input":"hello 2"}');
+                $second = $client->recv(5);
+                if (is_object($second) && property_exists($second, 'data')) {
+                    $result['frames'][] = (string) $second->data;
+                } elseif ($second !== false && $second !== '') {
+                    $result['frames'][] = (string) $second;
+                }
+                $client->close();
+            });
+
+            self::assertTrue($result['second_push'] === true, 'Expected second downstream push to succeed');
+            self::assertCount(2, $result['frames']);
+            self::assertStringContainsString('"type":"response.completed"', $result['frames'][0]);
+            self::assertStringContainsString('"type":"response.completed"', $result['frames'][1]);
+
+            $attempts = $this->waitForJsonLines($captureFile, 2);
+            self::assertSame([
+                'input' => 'hello 1',
+                'type' => 'response.create',
+            ], json_decode($attempts[0]['payload'], true, flags: JSON_THROW_ON_ERROR));
+            self::assertSame([
+                'input' => 'hello 2',
+                'type' => 'response.create',
+            ], json_decode($attempts[1]['payload'], true, flags: JSON_THROW_ON_ERROR));
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testReopensUpstreamForSequentialRequestAfterUpstreamIdleClose(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-sequential-reopen');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-websocket-request.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-done-upstream.php', (string) $upstreamPort, $captureFile, 'close'], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $result = [
+                'frames' => [],
+                'second_push' => null,
+            ];
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$result): void {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $client->set(['timeout' => 5]);
+                if (!$client->upgrade('/v1/responses')) {
+                    $result['frames'][] = 'upgrade failed: ' . (string) $client->errCode;
+                    $client->close();
+                    return;
+                }
+
+                $client->push('{"input":"hello 1"}');
+                $first = $client->recv(5);
+                if (is_object($first) && property_exists($first, 'data')) {
+                    $result['frames'][] = (string) $first->data;
+                } elseif ($first !== false && $first !== '') {
+                    $result['frames'][] = (string) $first;
+                }
+
+                \Swoole\Coroutine::sleep(0.2);
+
+                $result['second_push'] = $client->push('{"input":"hello 2"}');
+                $second = $client->recv(5);
+                if (is_object($second) && property_exists($second, 'data')) {
+                    $result['frames'][] = (string) $second->data;
+                } elseif ($second !== false && $second !== '') {
+                    $result['frames'][] = (string) $second;
+                }
+                $client->close();
+            });
+
+            self::assertTrue($result['second_push'] === true, 'Expected second downstream push to succeed after upstream close');
+            self::assertCount(2, $result['frames']);
+            self::assertStringContainsString('"type":"response.completed"', $result['frames'][0]);
+            self::assertStringContainsString('"type":"response.completed"', $result['frames'][1]);
+
+            $attempts = $this->waitForJsonLines($captureFile, 2);
+            self::assertSame([
+                'input' => 'hello 1',
+                'type' => 'response.create',
+            ], json_decode($attempts[0]['payload'], true, flags: JSON_THROW_ON_ERROR));
+            self::assertSame([
+                'input' => 'hello 2',
+                'type' => 'response.create',
+            ], json_decode($attempts[1]['payload'], true, flags: JSON_THROW_ON_ERROR));
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testQueuesSequentialRequestsOnSameDownstreamWebSocketUntilPreviousResponseCompletes(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-queued');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-websocket-request.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-queued-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $frames = [];
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$frames): void {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $client->set(['timeout' => 5]);
+                if (!$client->upgrade('/v1/responses')) {
+                    $frames[] = 'upgrade failed: ' . (string) $client->errCode;
+                    $client->close();
+                    return;
+                }
+
+                $client->push('{"input":"hello 1"}');
+                $client->push('{"input":"hello 2"}');
+
+                for ($i = 0; $i < 2; $i++) {
+                    $frame = $client->recv(5);
+                    if (is_object($frame) && property_exists($frame, 'data')) {
+                        $frames[] = (string) $frame->data;
+                    } elseif ($frame !== false && $frame !== '') {
+                        $frames[] = (string) $frame;
+                    }
+                }
+                $client->close();
+            });
+
+            self::assertCount(2, $frames);
+            self::assertStringContainsString('resp_ws_first', $frames[0]);
+            self::assertStringContainsString('resp_ws_second', $frames[1]);
+            self::assertStringNotContainsString('resp_ws_out_of_order', implode("\n", $frames));
+
+            $attempts = $this->waitForJsonLines($captureFile, 2);
+            self::assertFalse((bool) ($attempts[0]['out_of_order'] ?? false));
+            self::assertFalse((bool) ($attempts[1]['out_of_order'] ?? false));
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testIgnoresLateUpstreamFrameAfterResponseCompleted(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-late-frame');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-websocket-request.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-late-frame-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $result = [
+                'frames' => [],
+                'late_frame' => null,
+            ];
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$result): void {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $client->set(['timeout' => 5]);
+                if (!$client->upgrade('/v1/responses')) {
+                    $result['frames'][] = 'upgrade failed: ' . (string) $client->errCode;
+                    $client->close();
+                    return;
+                }
+
+                $client->push('{"input":"hello 1"}');
+                $first = $client->recv(5);
+                if (is_object($first) && property_exists($first, 'data')) {
+                    $result['frames'][] = (string) $first->data;
+                } elseif ($first !== false && $first !== '') {
+                    $result['frames'][] = (string) $first;
+                }
+
+                $late = $client->recv(0.35);
+                if (is_object($late) && property_exists($late, 'data')) {
+                    $result['late_frame'] = (string) $late->data;
+                } elseif ($late !== false && $late !== '') {
+                    $result['late_frame'] = (string) $late;
+                }
+
+                $client->push('{"input":"hello 2"}');
+                $second = $client->recv(5);
+                if (is_object($second) && property_exists($second, 'data')) {
+                    $result['frames'][] = (string) $second->data;
+                } elseif ($second !== false && $second !== '') {
+                    $result['frames'][] = (string) $second;
+                }
+                $client->close();
+            });
+
+            self::assertCount(2, $result['frames']);
+            self::assertStringContainsString('resp_ws_first', $result['frames'][0]);
+            self::assertNull($result['late_frame'], 'Expected no extra downstream frame after response.completed');
+            self::assertStringContainsString('resp_ws_second', $result['frames'][1]);
+
+            $attempts = $this->waitForJsonLines($captureFile, 2);
+            self::assertCount(2, $attempts);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testReusesUpstreamWebSocketAcrossDownstreamReconnectForSameSession(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-session-reuse');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-websocket-request.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-session-reuse-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $frames = [];
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$frames): void {
+                $firstClient = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $firstClient->set(['timeout' => 5]);
+                $firstClient->setHeaders([
+                    'X-Codex-Turn-State' => 'turn-reuse',
+                ]);
+                if (!$firstClient->upgrade('/v1/responses')) {
+                    $frames[] = 'upgrade failed: ' . (string) $firstClient->errCode;
+                    $firstClient->close();
+                    return;
+                }
+
+                $firstClient->push('{"input":"hello 1"}');
+                $first = $firstClient->recv(5);
+                if (is_object($first) && property_exists($first, 'data')) {
+                    $frames[] = (string) $first->data;
+                } elseif ($first !== false && $first !== '') {
+                    $frames[] = (string) $first;
+                }
+                $firstClient->close();
+
+                $secondClient = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $secondClient->set(['timeout' => 5]);
+                $secondClient->setHeaders([
+                    'X-Codex-Turn-State' => 'turn-reuse',
+                ]);
+                if (!$secondClient->upgrade('/v1/responses')) {
+                    $frames[] = 'upgrade failed: ' . (string) $secondClient->errCode;
+                    $secondClient->close();
+                    return;
+                }
+
+                $secondClient->push('{"input":"hello 2"}');
+                $second = $secondClient->recv(5);
+                if (is_object($second) && property_exists($second, 'data')) {
+                    $frames[] = (string) $second->data;
+                } elseif ($second !== false && $second !== '') {
+                    $frames[] = (string) $second;
+                }
+                $secondClient->close();
+            });
+
+            self::assertCount(2, $frames);
+            self::assertStringContainsString('resp_ws_conn_1_msg_1', $frames[0]);
+            self::assertStringContainsString('resp_ws_conn_1_msg_2', $frames[1]);
+
+            $attempts = $this->waitForJsonLines($captureFile, 3);
+            self::assertSame('open', $attempts[0]['event']);
+            self::assertSame('message', $attempts[1]['event']);
+            self::assertSame('message', $attempts[2]['event']);
+            self::assertSame(1, $attempts[1]['connection_index']);
+            self::assertSame(1, $attempts[2]['connection_index']);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testClosesActiveUpstreamWhenDownstreamDisconnectsBeforeCompleted(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-abort-active-upstream');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-websocket-request.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-disconnect-reconnect-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $payload = null;
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$payload): void {
+                $firstClient = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $firstClient->set(['timeout' => 5]);
+                $firstClient->setHeaders(['X-Codex-Turn-State' => 'turn-abort-active']);
+                if (!$firstClient->upgrade('/v1/responses')) {
+                    $payload = 'first upgrade failed: ' . (string) $firstClient->errCode;
+                    $firstClient->close();
+                    return;
+                }
+                $firstClient->push('{"input":"hello 1"}');
+                $firstClient->close();
+
+                $secondClient = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $secondClient->set(['timeout' => 3]);
+                $secondClient->setHeaders(['X-Codex-Turn-State' => 'turn-abort-active']);
+                if (!$secondClient->upgrade('/v1/responses')) {
+                    $payload = 'second upgrade failed: ' . (string) $secondClient->errCode;
+                    $secondClient->close();
+                    return;
+                }
+
+                $secondClient->push('{"input":"hello 2"}');
+                $frame = $secondClient->recv(3);
+                if (is_object($frame) && property_exists($frame, 'data')) {
+                    $payload = (string) $frame->data;
+                } elseif ($frame !== false && $frame !== '') {
+                    $payload = (string) $frame;
+                }
+                $secondClient->close();
+            });
+
+            self::assertNotNull($payload);
+            self::assertStringContainsString('resp_ws_new_after_reconnect', (string) $payload);
+            self::assertStringNotContainsString('resp_ws_old_late', (string) $payload);
+
+            $attempts = $this->waitForJsonLines($captureFile, 4);
+            self::assertSame('open', $attempts[0]['event']);
+            self::assertSame('message', $attempts[1]['event']);
+            self::assertSame('open', $attempts[2]['event']);
+            self::assertSame('message', $attempts[3]['event']);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testReusesUpstreamWebSocketAcrossTurnStateChangesWhenStableSessionIdExists(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-session-stable-id');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-websocket-request.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-session-reuse-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $frames = [];
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$frames): void {
+                $firstClient = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $firstClient->set(['timeout' => 5]);
+                $firstClient->setHeaders([
+                    'X-Session-Id' => 'session-stable-1',
+                    'X-Codex-Turn-State' => 'turn-1',
+                ]);
+                if (!$firstClient->upgrade('/v1/responses')) {
+                    $frames[] = 'upgrade failed: ' . (string) $firstClient->errCode;
+                    $firstClient->close();
+                    return;
+                }
+
+                $firstClient->push('{"input":"hello 1"}');
+                $first = $firstClient->recv(5);
+                if (is_object($first) && property_exists($first, 'data')) {
+                    $frames[] = (string) $first->data;
+                } elseif ($first !== false && $first !== '') {
+                    $frames[] = (string) $first;
+                }
+                $firstClient->close();
+
+                $secondClient = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $secondClient->set(['timeout' => 5]);
+                $secondClient->setHeaders([
+                    'X-Session-Id' => 'session-stable-1',
+                    'X-Codex-Turn-State' => 'turn-2',
+                ]);
+                if (!$secondClient->upgrade('/v1/responses')) {
+                    $frames[] = 'upgrade failed: ' . (string) $secondClient->errCode;
+                    $secondClient->close();
+                    return;
+                }
+
+                $secondClient->push('{"input":"hello 2"}');
+                $second = $secondClient->recv(5);
+                if (is_object($second) && property_exists($second, 'data')) {
+                    $frames[] = (string) $second->data;
+                } elseif ($second !== false && $second !== '') {
+                    $frames[] = (string) $second;
+                }
+                $secondClient->close();
+            });
+
+            self::assertCount(2, $frames);
+            self::assertStringContainsString('resp_ws_conn_1_msg_1', $frames[0]);
+            self::assertStringContainsString('resp_ws_conn_1_msg_2', $frames[1]);
+
+            $attempts = $this->waitForJsonLines($captureFile, 3);
+            self::assertSame('open', $attempts[0]['event']);
+            self::assertSame('message', $attempts[1]['event']);
+            self::assertSame('message', $attempts[2]['event']);
+            self::assertSame(1, $attempts[1]['connection_index']);
+            self::assertSame(1, $attempts[2]['connection_index']);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
     public function testNormalizesWebSocketResponseDoneToCompleted(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {

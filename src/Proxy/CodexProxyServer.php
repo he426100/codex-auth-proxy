@@ -21,6 +21,7 @@ use Swoole\Coroutine;
 use Swoole\Coroutine\Http\Client;
 use Swoole\Http\Request;
 use Swoole\Http\Response;
+use Swoole\Timer;
 use Swoole\WebSocket\Frame;
 use Swoole\WebSocket\Server;
 use Throwable;
@@ -46,6 +47,8 @@ final class CodexProxyServer
         private readonly RequestIdFactory $requestIdFactory = new RequestIdFactory(),
         private readonly bool $traceMutations = true,
         private readonly bool $traceTimings = false,
+        private readonly int $websocketSessionIdleTtlSeconds = 300,
+        private readonly int $websocketSessionSweepIntervalSeconds = 30,
     ) {
         $this->activeLogger = $logger ?? new NullLogger();
         $this->activeTokenRefresher = $tokenRefresher ?? new TokenRefresher(proxy: $outboundProxyConfig?->guzzleProxy() ?? []);
@@ -64,6 +67,7 @@ final class CodexProxyServer
         $payloadNormalizer = new ResponsesPayloadNormalizer();
         $normalizer = new ResponsesWebSocketNormalizer();
         $retryTracker = new WebSocketRetryTracker();
+        $sessionRegistry = new CodexWebSocketSessionRegistry();
         $this->activeLogger->info('Loaded Codex accounts', ['count' => count($accounts)]);
 
         $server = $this->makeServer();
@@ -77,6 +81,7 @@ final class CodexProxyServer
             $payloadNormalizer,
             $normalizer,
             $retryTracker,
+            $sessionRegistry,
         );
 
         $server->start();
@@ -119,44 +124,49 @@ final class CodexProxyServer
         ResponsesPayloadNormalizer $payloadNormalizer,
         ResponsesWebSocketNormalizer $normalizer,
         WebSocketRetryTracker $retryTracker,
+        CodexWebSocketSessionRegistry $sessionRegistry,
     ): void {
-        /** @var array<int,Request> $websocketRequests */
-        $websocketRequests = [];
-        /** @var array<int,Client> $websocketClients */
-        $websocketClients = [];
-        /** @var array<int,array{payload:string,opcode:int,sessionKey:SessionKey}> $websocketLastPayloads */
-        $websocketLastPayloads = [];
-
-        $server->on('open', static function (Server $server, Request $request) use (&$websocketRequests): void {
+        $sessionSweepTimerId = null;
+        $server->on('open', static function (Server $server, Request $request) use ($sessionRegistry): void {
             $fd = (int) ($request->fd ?? 0);
             if ($fd > 0) {
-                $websocketRequests[$fd] = $request;
+                $sessionRegistry->rememberRequest($fd, $request);
             }
         });
 
-        $server->on('message', function (Server $server, Frame $frame) use (&$websocketRequests, &$websocketClients, &$websocketLastPayloads, $scheduler, $classifier, $repository, $extractor, $headers, $normalizer, $retryTracker): void {
-            $this->handleWebSocketMessage($server, $frame, $websocketRequests, $websocketClients, $websocketLastPayloads, $scheduler, $classifier, $repository, $extractor, $headers, $normalizer, $retryTracker);
+        $server->on('message', function (Server $server, Frame $frame) use ($sessionRegistry, $scheduler, $classifier, $repository, $extractor, $headers, $normalizer, $retryTracker): void {
+            $this->handleWebSocketMessage($server, $frame, $sessionRegistry, $scheduler, $classifier, $repository, $extractor, $headers, $normalizer, $retryTracker);
         });
 
-        $server->on('close', static function (Server $server, int $fd) use (&$websocketRequests, &$websocketClients, &$websocketLastPayloads, $retryTracker): void {
-            unset($websocketRequests[$fd]);
-            unset($websocketLastPayloads[$fd]);
+        $server->on('close', static function (Server $server, int $fd) use ($sessionRegistry, $retryTracker): void {
             $retryTracker->clear($fd);
-            if (isset($websocketClients[$fd])) {
-                $websocketClients[$fd]->close();
-                unset($websocketClients[$fd]);
-            }
+            $sessionRegistry->clear($fd)?->close();
         });
 
         $server->on('request', function (Request $request, Response $response) use ($scheduler, $classifier, $repository, $extractor, $headers, $payloadNormalizer): void {
             $this->handleHttp($request, $response, $scheduler, $classifier, $repository, $extractor, $headers, $payloadNormalizer);
         });
 
-        $server->on($this->shutdownEvent(), function () use (&$websocketClients): void {
-            foreach ($websocketClients as $client) {
+        $server->on('workerStart', function () use (&$sessionSweepTimerId, $sessionRegistry): void {
+            if ($this->websocketSessionIdleTtlSeconds <= 0 || $this->websocketSessionSweepIntervalSeconds <= 0) {
+                return;
+            }
+
+            $sessionSweepTimerId = Timer::tick($this->websocketSessionSweepIntervalSeconds * 1000, function () use ($sessionRegistry): void {
+                foreach ($sessionRegistry->sweepIdle($this->websocketSessionIdleTtlSeconds) as $client) {
+                    $client->close();
+                }
+            });
+        });
+
+        $server->on($this->shutdownEvent(), function () use ($sessionRegistry, &$sessionSweepTimerId): void {
+            if (is_int($sessionSweepTimerId)) {
+                Timer::clear($sessionSweepTimerId);
+                $sessionSweepTimerId = null;
+            }
+            foreach ($sessionRegistry->clearAll() as $client) {
                 $client->close();
             }
-            $websocketClients = [];
             $this->activeLogger->info('Codex auth proxy stopped');
         });
     }
@@ -279,17 +289,10 @@ final class CodexProxyServer
         }
     }
 
-    /**
-     * @param array<int,Request> $websocketRequests
-     * @param array<int,Client> $websocketClients
-     * @param array<int,array{payload:string,opcode:int,sessionKey:SessionKey}> $websocketLastPayloads
-     */
     private function handleWebSocketMessage(
         Server $server,
         Frame $frame,
-        array &$websocketRequests,
-        array &$websocketClients,
-        array &$websocketLastPayloads,
+        CodexWebSocketSessionRegistry $sessionRegistry,
         Scheduler $scheduler,
         ErrorClassifier $classifier,
         AccountRepository $repository,
@@ -299,26 +302,31 @@ final class CodexProxyServer
         WebSocketRetryTracker $retryTracker,
     ): void {
         $fd = (int) $frame->fd;
-        $request = $websocketRequests[$fd] ?? null;
+        $request = $sessionRegistry->request($fd);
         if ($request === null) {
             $this->pushWebSocketError($server, $fd, 400, 'Missing WebSocket handshake request');
             return;
         }
 
-        $client = $websocketClients[$fd] ?? null;
         $rawPayload = (string) $frame->data;
         $requestId = $this->requestIdFactory->fromHeaders($request->header ?? []);
         $sessionKey = $extractor->extract($request->header ?? [], $rawPayload);
+        $executionSessionKey = $extractor->extractExecutionSession($request->header ?? [], $rawPayload);
+        $session = $sessionRegistry->bindSession($fd, $executionSessionKey);
+        $sessionRegistry->abortActiveRequestForNewFd($fd)?->close();
+        $sessionId = $session->sessionId();
+        $client = $sessionRegistry->client($fd);
+        $account = $sessionRegistry->account($fd);
         $normalizedPayload = $normalizer->normalizeWithReport($rawPayload);
         $payload = $normalizedPayload->payload();
+        if (!$sessionRegistry->waitForRequestTurn($fd)) {
+            return;
+        }
         $this->tracePayloadMutations($requestId, 'websocket', $sessionKey, $normalizedPayload->mutations());
         $retryTracker->beginPayload($fd, $payload);
-        $websocketLastPayloads[$fd] = [
-            'payload' => $payload,
-            'opcode' => (int) $frame->opcode,
-            'sessionKey' => $sessionKey,
-        ];
-        if ($client === null) {
+        $sessionRegistry->rememberPayload($fd, $sessionKey, $payload, (int) $frame->opcode);
+        $sessionRegistry->markRequestActive($fd, true);
+        if ($client === null || !$account instanceof CodexAccount) {
             $account = null;
             $authRefreshAttempts = [];
             $requestStartedAt = microtime(true);
@@ -347,7 +355,7 @@ final class CodexProxyServer
                 );
                 $timings['upstream_upgrade'] = $this->elapsedMs($upgradeStartedAt);
 
-                $websocketClients[$fd] = $client;
+                $sessionRegistry->attachUpstream($fd, $client, $account);
                 $this->traceRequestTiming(
                     $requestId,
                     'websocket',
@@ -359,7 +367,7 @@ final class CodexProxyServer
                     1,
                     $this->timingPayload($timings, $requestStartedAt, null),
                 );
-                $this->startUpstreamWebSocketReader($server, $fd, $client, $request, $account, $websocketClients, $websocketLastPayloads, $scheduler, $classifier, $repository, $headers, $retryTracker);
+                $this->startUpstreamWebSocketReader($server, $sessionId, $client, $sessionRegistry, $scheduler, $classifier, $repository, $headers, $retryTracker);
             } catch (Throwable $throwable) {
                 $this->activeLogger->warning('Upstream WebSocket failed', ['request_id' => $requestId, 'error' => $throwable->getMessage()]);
                 if ($account instanceof CodexAccount) {
@@ -405,16 +413,67 @@ final class CodexProxyServer
                             'request_id' => $requestId,
                             'error' => $fallbackThrowable->getMessage(),
                         ]);
+                        $sessionRegistry->markRequestActive($fd, false);
+                        $sessionRegistry->releaseRequestTurn($fd);
                         $this->pushWebSocketError($server, $fd, 502, $fallbackThrowable->getMessage());
                     }
+                    $sessionRegistry->markRequestActive($fd, false);
+                    $sessionRegistry->releaseRequestTurn($fd);
                     return;
                 }
+                $sessionRegistry->markRequestActive($fd, false);
+                $sessionRegistry->releaseRequestTurn($fd);
                 $this->pushWebSocketError($server, $fd, 502, $throwable->getMessage());
                 return;
             }
         }
 
-        $client->push($payload, (int) $frame->opcode);
+        if ($this->pushUpstreamWebSocketPayload($client, $payload, (int) $frame->opcode)) {
+            return;
+        }
+
+        $this->activeLogger->warning('Upstream WebSocket send failed before response payload', [
+            'request_id' => $requestId,
+            'session' => $sessionKey->primary,
+            'account' => $account->name(),
+            'error' => $this->upstreamClientError('WebSocket send', $client),
+        ]);
+        if (!$retryTracker->claimRetry($fd, $payload, $account->accountId(), false)) {
+            $sessionRegistry->markRequestActive($fd, false);
+            $sessionRegistry->releaseRequestTurn($fd);
+            $this->pushWebSocketError($server, $fd, 502, $this->upstreamClientError('WebSocket send', $client));
+            return;
+        }
+
+        try {
+            $authRefreshAttempts = [];
+            [$replacementClient, $account] = $this->openUpstreamWebSocketWithRecovery(
+                $request,
+                $this->freshAccount($account, $repository, $scheduler),
+                $headers,
+                $classifier,
+                $sessionKey,
+                $scheduler,
+                $repository,
+                $requestId,
+                $authRefreshAttempts,
+            );
+            $client->close();
+            $sessionRegistry->attachUpstream($fd, $replacementClient, $account);
+            $this->startUpstreamWebSocketReader($server, $sessionId, $replacementClient, $sessionRegistry, $scheduler, $classifier, $repository, $headers, $retryTracker);
+            if ($this->pushUpstreamWebSocketPayload($replacementClient, $payload, (int) $frame->opcode)) {
+                return;
+            }
+            $sessionRegistry->detachUpstreamFromSession($sessionId, $replacementClient);
+            $replacementClient->close();
+            $sessionRegistry->markRequestActive($fd, false);
+            $sessionRegistry->releaseRequestTurn($fd);
+            $this->pushWebSocketError($server, $fd, 502, $this->upstreamClientError('WebSocket send', $replacementClient));
+        } catch (Throwable $throwable) {
+            $sessionRegistry->markRequestActive($fd, false);
+            $sessionRegistry->releaseRequestTurn($fd);
+            $this->pushWebSocketError($server, $fd, 502, $throwable->getMessage());
+        }
     }
 
     /** @return array{status:int,body:string,headers:array<string,string>,streamed:bool,timings:array{upstream:float,first_byte:?float}} */
@@ -864,18 +923,11 @@ final class CodexProxyServer
         return $operation . ' failed: errCode=' . (int) $client->errCode . ' errMsg=' . $message;
     }
 
-    /**
-     * @param array<int,Client> $websocketClients
-     * @param array<int,array{payload:string,opcode:int,sessionKey:SessionKey}> $websocketLastPayloads
-     */
     private function startUpstreamWebSocketReader(
         Server $server,
-        int $fd,
+        string $sessionId,
         Client $client,
-        Request $request,
-        CodexAccount $account,
-        array &$websocketClients,
-        array &$websocketLastPayloads,
+        CodexWebSocketSessionRegistry $sessionRegistry,
         Scheduler $scheduler,
         ErrorClassifier $classifier,
         AccountRepository $repository,
@@ -883,14 +935,16 @@ final class CodexProxyServer
         WebSocketRetryTracker $retryTracker,
     ): void
     {
-        Coroutine::create(function () use ($server, $fd, $client, $request, $account, &$websocketClients, &$websocketLastPayloads, $scheduler, $classifier, $repository, $headers, $retryTracker): void {
+        Coroutine::create(function () use ($server, $sessionId, $client, $sessionRegistry, $scheduler, $classifier, $repository, $headers, $retryTracker): void {
             $forwardedData = false;
-            $completedSeen = false;
             $replacedClient = false;
             $terminalErrorSent = false;
             while (true) {
                 $frame = $client->recv();
                 if ($frame === false || $frame === '') {
+                    break;
+                }
+                if ($sessionRegistry->clientForSession($sessionId) !== $client) {
                     break;
                 }
 
@@ -899,11 +953,23 @@ final class CodexProxyServer
                 if ($opcode === \WEBSOCKET_OPCODE_CLOSE) {
                     break;
                 }
+                if (!$sessionRegistry->hasActiveRequestForSession($sessionId)) {
+                    continue;
+                }
+                $fd = $sessionRegistry->activeFdForSession($sessionId);
+                if ($fd === null) {
+                    continue;
+                }
+                $request = $sessionRegistry->request($fd);
+                $account = $sessionRegistry->accountForSession($sessionId);
+                if (!$request instanceof Request || !$account instanceof CodexAccount) {
+                    continue;
+                }
                 $data = StreamErrorDetector::normalizeCompletedPayload($data);
                 $completedSeen = StreamErrorDetector::isCompletedPayload($data);
                 $errorBody = StreamErrorDetector::jsonErrorBody($data);
                 if ($errorBody !== null) {
-                    $lastPayload = $websocketLastPayloads[$fd] ?? null;
+                    $lastPayload = $sessionRegistry->lastPayloadForSession($sessionId);
                     $sessionKey = $lastPayload['sessionKey'] ?? new SessionKey('global', null);
                     $requestId = $this->requestIdFactory->fromHeaders($request->header ?? []);
                     $classification = $this->traceWebSocketStreamError($requestId, $sessionKey, $account, $errorBody, $classifier);
@@ -929,9 +995,17 @@ final class CodexProxyServer
                                     $requestId,
                                     $authRefreshAttempts,
                                 );
-                                $websocketClients[$fd] = $replacementClient;
-                                $this->startUpstreamWebSocketReader($server, $fd, $replacementClient, $request, $replacement, $websocketClients, $websocketLastPayloads, $scheduler, $classifier, $repository, $headers, $retryTracker);
-                                $replacementClient->push($lastPayload['payload'], $lastPayload['opcode']);
+                                $sessionRegistry->attachUpstreamToSession($sessionId, $replacementClient, $replacement);
+                                $this->startUpstreamWebSocketReader($server, $sessionId, $replacementClient, $sessionRegistry, $scheduler, $classifier, $repository, $headers, $retryTracker);
+                                if (!$this->pushUpstreamWebSocketPayload($replacementClient, $lastPayload['payload'], $lastPayload['opcode'])) {
+                                    $sessionRegistry->detachUpstreamFromSession($sessionId, $replacementClient);
+                                    $replacementClient->close();
+                                    $sessionRegistry->markRequestActive($fd, false);
+                                    $sessionRegistry->releaseRequestTurn($fd);
+                                    $this->pushWebSocketError($server, $fd, 502, $this->upstreamClientError('WebSocket send', $replacementClient));
+                                    $terminalErrorSent = true;
+                                    break;
+                                }
                                 $replacedClient = true;
                                 break;
                             } catch (Throwable $throwable) {
@@ -941,9 +1015,13 @@ final class CodexProxyServer
                                         $server->push($fd, $data, $opcode);
                                         $forwardedData = true;
                                     }
+                                    $sessionRegistry->markRequestActive($fd, false);
+                                    $sessionRegistry->releaseRequestTurn($fd);
                                     $terminalErrorSent = true;
                                     break;
                                 }
+                                $sessionRegistry->markRequestActive($fd, false);
+                                $sessionRegistry->releaseRequestTurn($fd);
                                 $this->pushWebSocketError($server, $fd, 502, $throwable->getMessage());
                                 $terminalErrorSent = true;
                                 break;
@@ -957,6 +1035,8 @@ final class CodexProxyServer
                         }
                     }
 
+                    $sessionRegistry->markRequestActive($fd, false);
+                    $sessionRegistry->releaseRequestTurn($fd);
                     $terminalErrorSent = true;
                 }
 
@@ -966,22 +1046,88 @@ final class CodexProxyServer
                 }
 
                 if ($completedSeen) {
-                    break;
+                    $sessionRegistry->markRequestActive($fd, false);
+                    $sessionRegistry->releaseRequestTurn($fd);
+                    $forwardedData = false;
+                    $terminalErrorSent = false;
+                    continue;
                 }
             }
 
+            $clientStillCurrent = $sessionRegistry->clientForSession($sessionId) === $client;
+            $fd = $sessionRegistry->activeFdForSession($sessionId);
+            $request = $fd !== null ? $sessionRegistry->request($fd) : null;
+            $account = $sessionRegistry->accountForSession($sessionId);
+            $sessionRegistry->detachUpstreamFromSession($sessionId, $client);
             $client->close();
-            if (!$replacedClient && $server->isEstablished($fd)) {
-                if ($terminalErrorSent) {
-                    return;
-                }
-                if (!$completedSeen) {
-                    $this->pushWebSocketError($server, $fd, 502, $this->incompleteStreamMessage());
-                    return;
-                }
-                $server->disconnect($fd, \SWOOLE_WEBSOCKET_CLOSE_NORMAL, 'upstream closed');
+            if (!$clientStillCurrent) {
+                return;
             }
+
+            if ($replacedClient) {
+                return;
+            }
+            if (!$sessionRegistry->hasActiveRequestForSession($sessionId)) {
+                return;
+            }
+            if ($fd === null || !$server->isEstablished($fd)) {
+                return;
+            }
+            if (!$request instanceof Request || !$account instanceof CodexAccount) {
+                return;
+            }
+            if ($terminalErrorSent) {
+                $sessionRegistry->markRequestActive($fd, false);
+                $sessionRegistry->releaseRequestTurn($fd);
+                return;
+            }
+            if (!$forwardedData) {
+                $lastPayload = $sessionRegistry->lastPayloadForSession($sessionId);
+                if ($lastPayload !== null && $retryTracker->claimRetry($fd, $lastPayload['payload'], $account->accountId(), false)) {
+                    $requestId = $this->requestIdFactory->fromHeaders($request->header ?? []);
+                    $this->activeLogger->warning('Retrying WebSocket request after upstream closed before first payload', [
+                        'request_id' => $requestId,
+                        'session' => $lastPayload['sessionKey']->primary,
+                        'account' => $account->name(),
+                    ]);
+                    try {
+                        $authRefreshAttempts = [];
+                        [$replacementClient, $replacement] = $this->openUpstreamWebSocketWithRecovery(
+                            $request,
+                            $this->freshAccount($account, $repository, $scheduler),
+                            $headers,
+                            $classifier,
+                            $lastPayload['sessionKey'],
+                            $scheduler,
+                            $repository,
+                            $requestId,
+                            $authRefreshAttempts,
+                        );
+                        $sessionRegistry->attachUpstreamToSession($sessionId, $replacementClient, $replacement);
+                        $this->startUpstreamWebSocketReader($server, $sessionId, $replacementClient, $sessionRegistry, $scheduler, $classifier, $repository, $headers, $retryTracker);
+                        if ($this->pushUpstreamWebSocketPayload($replacementClient, $lastPayload['payload'], $lastPayload['opcode'])) {
+                            return;
+                        }
+                        $sessionRegistry->markRequestActive($fd, false);
+                        $sessionRegistry->releaseRequestTurn($fd);
+                        $this->pushWebSocketError($server, $fd, 502, $this->upstreamClientError('WebSocket send', $replacementClient));
+                    } catch (Throwable $throwable) {
+                        $sessionRegistry->markRequestActive($fd, false);
+                        $sessionRegistry->releaseRequestTurn($fd);
+                        $this->pushWebSocketError($server, $fd, 502, $throwable->getMessage());
+                    }
+                    return;
+                }
+            }
+            $sessionRegistry->markRequestActive($fd, false);
+            $sessionRegistry->releaseRequestTurn($fd);
+            $this->pushWebSocketError($server, $fd, 502, $this->incompleteStreamMessage());
         });
+    }
+
+    private function pushUpstreamWebSocketPayload(Client $client, string $payload, int $opcode): bool
+    {
+        return $client->push($payload, $opcode) !== false;
     }
 
     private function httpAcceptFor(string $requestUri): string
