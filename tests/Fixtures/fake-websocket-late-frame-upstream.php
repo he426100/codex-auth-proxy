@@ -11,8 +11,9 @@ require dirname(__DIR__, 2) . '/vendor/autoload.php';
 
 $port = (int) ($argv[1] ?? 0);
 $captureFile = (string) ($argv[2] ?? '');
+$mode = (string) ($argv[3] ?? 'late-error');
 if ($port <= 0 || $captureFile === '') {
-    fwrite(STDERR, "usage: fake-websocket-late-frame-upstream.php <port> <capture-file>\n");
+    fwrite(STDERR, "usage: fake-websocket-late-frame-upstream.php <port> <capture-file> [late-error|late-completed]\n");
     exit(2);
 }
 
@@ -35,7 +36,7 @@ $server->on('request', static function (Request $request, Response $response): v
     $response->end('not found');
 });
 
-$server->on('message', static function (Server $server, Frame $frame) use ($captureFile, &$messageCount): void {
+$server->on('message', static function (Server $server, Frame $frame) use ($captureFile, &$messageCount, $mode): void {
     $messageCount++;
     file_put_contents($captureFile, json_encode([
         'payload' => (string) $frame->data,
@@ -44,8 +45,12 @@ $server->on('message', static function (Server $server, Frame $frame) use ($capt
 
     if ($messageCount === 1) {
         $server->push($frame->fd, '{"type":"response.done","response":{"id":"resp_ws_first"}}');
-        Swoole\Timer::after(150, static function () use ($server, $frame): void {
+        Swoole\Timer::after(150, static function () use ($server, $frame, $mode): void {
             if ($server->isEstablished($frame->fd)) {
+                if ($mode === 'late-completed') {
+                    $server->push($frame->fd, '{"type":"response.done","response":{"id":"resp_ws_late_after_done"}}');
+                    return;
+                }
                 $server->push($frame->fd, '{"type":"error","error":{"code":"server_error","message":"late upstream frame","status":500}}');
             }
         });

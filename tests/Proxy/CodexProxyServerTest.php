@@ -348,6 +348,61 @@ final class CodexProxyServerTest extends TestCase
         self::assertSame('acct-beta', $records[0]['context']['bound_account_id']);
     }
 
+    public function testRecordsLineageAffinityContextForAccountSelectionTrace(): void
+    {
+        [$traceFile, $traceLogger] = $this->traceLogger('proxy-selection-trace-lineage-context');
+        $server = $this->server([
+            'requestTraceLogger' => $traceLogger,
+        ]);
+
+        $method = new ReflectionMethod(CodexProxyServer::class, 'traceAccountSelection');
+        $method->invoke(
+            $server,
+            'req-selection-lineage',
+            'websocket',
+            new SessionKey('previous_response_id:resp_prev_beta'),
+            [
+                'source' => 'rebind_response_affinity',
+                'selected_account_id' => 'acct-beta',
+                'selected_account_name' => 'beta',
+            ],
+            [
+                'previous_response_id' => 'resp_prev_beta',
+                'response_affinity_account_id' => 'acct-beta',
+                'response_affinity_hit' => true,
+            ],
+        );
+
+        $records = $this->traceRecords($traceFile);
+        self::assertCount(1, $records);
+        self::assertSame('resp_prev_beta', $records[0]['context']['previous_response_id']);
+        self::assertSame('acct-beta', $records[0]['context']['response_affinity_account_id']);
+        self::assertTrue($records[0]['context']['response_affinity_hit']);
+    }
+
+    public function testBuildsSelectionTraceContextFromPreviousResponsePayload(): void
+    {
+        $statePath = $this->tempDir('proxy-selection-trace-affinity-state') . '/state.json';
+        StateStore::file($statePath)->rememberResponseAccount('resp_prev_beta', 'acct-beta');
+        $server = $this->server([
+            'stateFile' => $statePath,
+        ]);
+
+        $method = new ReflectionMethod(CodexProxyServer::class, 'selectionTraceContextForPayload');
+        $context = $method->invoke(
+            $server,
+            '{"input":"continue","previous_response_id":"resp_prev_beta"}',
+            'acct-beta',
+        );
+
+        self::assertSame([
+            'previous_response_id' => 'resp_prev_beta',
+            'response_affinity_hit' => true,
+            'response_affinity_account_id' => 'acct-beta',
+        ], $context);
+        self::assertSame([], $method->invoke($server, '{"input":"hello"}', null));
+    }
+
     public function testTouchesExistingSessionBindingWhenWebSocketSessionIsReused(): void
     {
         $statePath = $this->tempDir('proxy-session-touch-state') . '/state.json';

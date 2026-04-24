@@ -63,6 +63,10 @@ final class ErrorClassifier
             return new ErrorClassification('quota', true, $this->cooldownUntil($body, $headers, $now));
         }
 
+        if ($this->containsLineageSignal($fields)) {
+            return new ErrorClassification('lineage', false, 0);
+        }
+
         if ($this->containsTransientSignal($fields)) {
             return new ErrorClassification('transient', false, 0);
         }
@@ -107,6 +111,14 @@ final class ErrorClassifier
             'httpconnectionfailed',
             'responsestreamconnectionfailed',
             'responsestreamdisconnected',
+        ]);
+    }
+
+    /** @param list<string> $fields */
+    private function containsLineageSignal(array $fields): bool
+    {
+        return $this->containsSignal($fields, [
+            'previous_response_not_found',
         ]);
     }
 

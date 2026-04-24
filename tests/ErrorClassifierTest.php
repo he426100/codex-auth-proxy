@@ -99,4 +99,15 @@ final class ErrorClassifierTest extends TestCase
         self::assertTrue($classification->hardSwitch());
         self::assertSame(1300, $classification->cooldownUntil());
     }
+
+    public function testClassifiesPreviousResponseNotFoundAsLineageErrorWithoutHardSwitch(): void
+    {
+        $payload = '{"type":"error","error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response not found.","param":"previous_response_id"},"status":400}';
+
+        $classification = (new ErrorClassifier())->classify(400, $payload, [], 1000);
+
+        self::assertSame('lineage', $classification->type());
+        self::assertFalse($classification->hardSwitch());
+        self::assertSame(0, $classification->cooldownUntil());
+    }
 }

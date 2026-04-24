@@ -52,6 +52,8 @@ final class RequestTraceLogger
             'classification',
             'selection_source',
             'selected_account_id',
+            'previous_response_id',
+            'response_affinity_account_id',
             'previous_account_id',
             'excluded_account_id',
             'cooldown_reason',
@@ -71,6 +73,9 @@ final class RequestTraceLogger
         }
         if (isset($event['session_is_active']) && is_bool($event['session_is_active'])) {
             $payload['session_is_active'] = $event['session_is_active'];
+        }
+        if (isset($event['response_affinity_hit']) && is_bool($event['response_affinity_hit'])) {
+            $payload['response_affinity_hit'] = $event['response_affinity_hit'];
         }
         if (isset($event['attempts']) && is_int($event['attempts']) && $event['attempts'] > 0) {
             $payload['attempts'] = $event['attempts'];

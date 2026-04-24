@@ -9,6 +9,8 @@ use CodexAuthProxy\Usage\CachedAccountUsage;
 
 final class StateStore
 {
+    private const MAX_RESPONSE_AFFINITY_ENTRIES = 2048;
+
     private ?string $stateRevision = null;
     private string $candidateRevision = 'missing';
     private int $memoryRevision = 0;
@@ -27,6 +29,7 @@ final class StateStore
      *   accounts: array<string,mixed>,
      *   sessions: array<string,mixed>,
      *   session_meta: array<string,mixed>,
+     *   responses: array<string,mixed>,
      *   cursor: int,
      *   usage: array<string,mixed>
      * }
@@ -37,6 +40,7 @@ final class StateStore
             'accounts' => [],
             'sessions' => [],
             'session_meta' => [],
+            'responses' => [],
             'cursor' => 0,
             'usage' => [],
         ];
@@ -61,7 +65,7 @@ final class StateStore
         return $store;
     }
 
-    /** @return array{accounts: array<string,mixed>, sessions: array<string,mixed>, session_meta: array<string,mixed>, cursor: int, usage: array<string,mixed>} */
+    /** @return array{accounts: array<string,mixed>, sessions: array<string,mixed>, session_meta: array<string,mixed>, responses: array<string,mixed>, cursor: int, usage: array<string,mixed>} */
     public function snapshot(): array
     {
         $this->reload();
@@ -122,6 +126,32 @@ final class StateStore
                 : [];
             $meta['last_seen_at'] = $seenAt !== null && $seenAt > 0 ? $seenAt : time();
             $state['session_meta'][$sessionKey] = $meta;
+        });
+    }
+
+    public function responseAccount(string $responseId): ?string
+    {
+        $this->reload();
+        $value = $this->state['responses'][$responseId] ?? null;
+
+        return $this->responseAccountValue($value);
+    }
+
+    public function rememberResponseAccount(string $responseId, string $accountId): void
+    {
+        $this->update(function (array &$state) use ($responseId, $accountId): void {
+            if ($responseId === '' || $accountId === '') {
+                return;
+            }
+            if (!isset($state['responses']) || !is_array($state['responses'])) {
+                $state['responses'] = [];
+            }
+
+            unset($state['responses'][$responseId]);
+            $state['responses'][$responseId] = $accountId;
+            if (count($state['responses']) > self::MAX_RESPONSE_AFFINITY_ENTRIES) {
+                $state['responses'] = array_slice($state['responses'], -self::MAX_RESPONSE_AFFINITY_ENTRIES, null, true);
+            }
         });
     }
 
@@ -345,7 +375,7 @@ final class StateStore
     private static function normalizeState(array $state): array
     {
         $state += self::defaultState();
-        foreach (['accounts', 'sessions', 'session_meta', 'usage'] as $key) {
+        foreach (['accounts', 'sessions', 'session_meta', 'responses', 'usage'] as $key) {
             if (!isset($state[$key]) || !is_array($state[$key])) {
                 $state[$key] = [];
             }
@@ -420,6 +450,21 @@ final class StateStore
     private function lastSeenAtValue(mixed $value): ?int
     {
         return is_int($value) && $value > 0 ? $value : null;
+    }
+
+    private function responseAccountValue(mixed $value): ?string
+    {
+        if (is_string($value) && $value !== '') {
+            return $value;
+        }
+        if (is_array($value)) {
+            $accountId = $value['account_id'] ?? null;
+            if (is_string($accountId) && $accountId !== '') {
+                return $accountId;
+            }
+        }
+
+        return null;
     }
 
     /**

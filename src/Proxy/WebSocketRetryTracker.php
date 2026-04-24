@@ -44,6 +44,21 @@ final class WebSocketRetryTracker
         return true;
     }
 
+    /** @return list<string> */
+    public function attemptedAccounts(int $fd, string $payload): array
+    {
+        $hash = sha1($payload);
+        $entry = $this->payloadAttempts[$fd] ?? null;
+        if (!is_array($entry) || $entry['hash'] !== $hash) {
+            return [];
+        }
+
+        return array_keys(array_filter(
+            $entry['attempted_accounts'],
+            static fn (mixed $attempted): bool => $attempted === true,
+        ));
+    }
+
     public function clear(int $fd): void
     {
         unset($this->payloadAttempts[$fd]);

@@ -42,4 +42,17 @@ final class StreamErrorDetectorTest extends TestCase
             StreamErrorDetector::normalizeCompletedPayload('{"type":"response.completed","response":{"id":"resp_2"}}'),
         );
     }
+
+    public function testExtractsExplicitErrorStatusFromBufferedPayload(): void
+    {
+        self::assertSame(
+            400,
+            StreamErrorDetector::jsonErrorStatus('{"type":"error","error":{"code":"previous_response_not_found","message":"missing"},"status":400}'),
+        );
+        self::assertSame(
+            429,
+            StreamErrorDetector::jsonErrorStatus('{"error":{"code":"usage_limit_reached","status":"429"}}'),
+        );
+        self::assertNull(StreamErrorDetector::jsonErrorStatus('{"type":"response.completed"}'));
+    }
 }

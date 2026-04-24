@@ -110,6 +110,19 @@ final class StateStoreUsageTest extends TestCase
         ], $state->sessionBinding('thread-1'));
     }
 
+    public function testPersistsResponseAffinityMappings(): void
+    {
+        $dir = $this->tempDir('cap-state');
+        $path = $dir . '/state.json';
+        $state = StateStore::file($path);
+
+        $state->rememberResponseAccount('resp_123', 'acct-beta');
+        $reloaded = StateStore::file($path);
+
+        self::assertSame('acct-beta', $reloaded->responseAccount('resp_123'));
+        self::assertSame('acct-beta', $reloaded->snapshot()['responses']['resp_123'] ?? null);
+    }
+
     public function testPersistsAndReloadsCachedAccountUsage(): void
     {
         $dir = $this->tempDir('cap-state');
@@ -177,6 +190,42 @@ final class StateStoreUsageTest extends TestCase
         self::assertSame('acct-beta', $reloaded->sessionAccount('thread-2'));
         self::assertNotNull($reloaded->accountUsage('acct-alpha'));
         self::assertSame(7.0, $reloaded->accountUsage('acct-alpha')?->primary?->leftPercent);
+    }
+
+    public function testWritesMergeResponseAffinityChangesFromOtherProcesses(): void
+    {
+        $dir = $this->tempDir('cap-state');
+        $path = $dir . '/state.json';
+        $serveState = StateStore::file($path);
+        $serveState->bindSession('thread-1', 'acct-alpha');
+
+        StateStore::file($path)->rememberResponseAccount('resp-prev-beta', 'acct-beta');
+
+        $serveState->setAccountUsageError('acct-alpha', 'upstream unavailable', 1234567999);
+        $reloaded = StateStore::file($path);
+
+        self::assertSame('acct-alpha', $reloaded->sessionAccount('thread-1'));
+        self::assertSame('acct-beta', $reloaded->responseAccount('resp-prev-beta'));
+        self::assertSame('upstream unavailable', $reloaded->accountUsage('acct-alpha')?->error);
+    }
+
+    public function testPrunesOldestResponseAffinityMappingsWhenCapacityIsExceeded(): void
+    {
+        $dir = $this->tempDir('cap-state');
+        $path = $dir . '/state.json';
+        $state = StateStore::file($path);
+
+        for ($index = 0; $index < 2050; $index++) {
+            $state->rememberResponseAccount('resp_' . $index, 'acct-' . ($index % 3));
+        }
+
+        $snapshot = StateStore::file($path)->snapshot();
+        self::assertCount(2048, $snapshot['responses']);
+        self::assertArrayNotHasKey('resp_0', $snapshot['responses']);
+        self::assertArrayNotHasKey('resp_1', $snapshot['responses']);
+        self::assertSame('acct-1', $snapshot['responses']['resp_2047'] ?? null);
+        self::assertSame('acct-2', $snapshot['responses']['resp_2048'] ?? null);
+        self::assertSame('acct-0', $snapshot['responses']['resp_2049'] ?? null);
     }
 
     public function testConsumesCursorAcrossFileBackedInstances(): void

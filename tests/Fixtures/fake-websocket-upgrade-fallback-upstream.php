@@ -12,7 +12,7 @@ $port = (int) ($argv[1] ?? 0);
 $captureFile = (string) ($argv[2] ?? '');
 $mode = (string) ($argv[3] ?? 'success');
 if ($port <= 0 || $captureFile === '') {
-    fwrite(STDERR, "usage: fake-websocket-upgrade-fallback-upstream.php <port> <capture-file> [success|error]\n");
+    fwrite(STDERR, "usage: fake-websocket-upgrade-fallback-upstream.php <port> <capture-file> [success|error|lineage]\n");
     exit(2);
 }
 
@@ -33,6 +33,7 @@ $server->on('request', static function (Request $request, Response $response) us
         'path' => $path,
         'upgrade' => (string) ($request->header['upgrade'] ?? ''),
         'accept' => (string) ($request->header['accept'] ?? ''),
+        'account_id' => (string) ($request->header['chatgpt-account-id'] ?? ''),
         'authorization' => (string) ($request->header['authorization'] ?? ''),
         'body' => $request->rawContent(),
     ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n", FILE_APPEND);
@@ -51,6 +52,26 @@ $server->on('request', static function (Request $request, Response $response) us
         $response->write("data: {\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"code\":\"server_error\",\"message\":\"transient failed\"}}\n\n");
         $response->end();
         return;
+    }
+
+    if ($mode === 'lineage') {
+        $decoded = json_decode((string) $request->rawContent(), true);
+        $previousResponseId = is_array($decoded) && is_string($decoded['previous_response_id'] ?? null)
+            ? $decoded['previous_response_id']
+            : null;
+        $accountId = (string) ($request->header['chatgpt-account-id'] ?? '');
+
+        if ($previousResponseId === 'resp_prev_beta' && $accountId !== 'acct-beta') {
+            $response->write("event: error\n");
+            $response->write("data: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"code\":\"previous_response_not_found\",\"message\":\"Previous response with id 'resp_prev_beta' not found.\",\"param\":\"previous_response_id\"},\"status\":400}\n\n");
+            $response->end();
+            return;
+        }
+        if ($previousResponseId === 'resp_prev_beta') {
+            $response->write("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_http_beta_next\",\"output\":[]}}\n\n");
+            $response->end();
+            return;
+        }
     }
 
     $response->write("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n");

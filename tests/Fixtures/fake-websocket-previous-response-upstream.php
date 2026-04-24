@@ -11,23 +11,18 @@ require dirname(__DIR__, 2) . '/vendor/autoload.php';
 
 $port = (int) ($argv[1] ?? 0);
 $captureFile = (string) ($argv[2] ?? '');
-/** @var mixed $disconnectArg */
-$disconnectArg = $argv[3] ?? false;
-$disconnectAfterResponse = match (strtolower((string) $disconnectArg)) {
-    '1', 'true', 'yes', 'on', 'close' => true,
-    default => false,
-};
+$mode = (string) ($argv[3] ?? 'default');
 if ($port <= 0 || $captureFile === '') {
-    fwrite(STDERR, "usage: fake-websocket-done-upstream.php <port> <capture-file> [disconnect-after-response]\n");
+    fwrite(STDERR, "usage: fake-websocket-previous-response-upstream.php <port> <capture-file> [default|all-miss]\n");
     exit(2);
 }
 
+$connectionsByFd = [];
 $server = new Server('127.0.0.1', $port, SWOOLE_BASE);
 $server->set([
     'worker_num' => 1,
     'log_file' => '/dev/null',
 ]);
-$connectionsByFd = [];
 $server->on('request', static function (Request $request, Response $response): void {
     $path = (string) ($request->server['request_uri'] ?? '/');
     if ($path === '/health') {
@@ -44,13 +39,25 @@ $server->on('open', static function (Server $server, Request $request) use (&$co
         return;
     }
 
+    $path = (string) ($request->server['request_uri'] ?? '/');
+    $query = (string) ($request->server['query_string'] ?? '');
+    $target = $query !== '' ? $path . '?' . $query : $path;
+
     $connectionsByFd[$fd] = [
         'account_id' => (string) ($request->header['chatgpt-account-id'] ?? ''),
+        'path' => $path,
+        'query' => $query,
+        'target' => $target,
     ];
 });
-$server->on('message', static function (Server $server, Frame $frame) use ($captureFile, $disconnectAfterResponse, &$connectionsByFd): void {
+$server->on('message', static function (Server $server, Frame $frame) use (&$connectionsByFd, $captureFile, $mode): void {
     $fd = (int) $frame->fd;
-    $connection = $connectionsByFd[$fd] ?? ['account_id' => ''];
+    $connection = $connectionsByFd[$fd] ?? [
+        'account_id' => '',
+        'path' => '/',
+        'query' => '',
+        'target' => '/',
+    ];
     $accountId = (string) $connection['account_id'];
     $decoded = json_decode((string) $frame->data, true);
     $previousResponseId = is_array($decoded) && is_string($decoded['previous_response_id'] ?? null)
@@ -59,23 +66,25 @@ $server->on('message', static function (Server $server, Frame $frame) use ($capt
 
     file_put_contents($captureFile, json_encode([
         'account_id' => $accountId,
+        'path' => (string) $connection['path'],
+        'query' => (string) $connection['query'],
+        'target' => (string) $connection['target'],
         'previous_response_id' => $previousResponseId,
         'payload' => (string) $frame->data,
     ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n", FILE_APPEND);
 
-    if ($previousResponseId === 'resp_ws_done' && $accountId !== 'acct-alpha') {
-        $server->push($frame->fd, '{"type":"error","error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id \'resp_ws_done\' not found.","param":"previous_response_id"},"status":400}');
-        return;
-    }
-    if ($previousResponseId === 'resp_ws_done') {
-        $server->push($frame->fd, '{"type":"response.done","response":{"id":"resp_after_done_alpha"}}');
+    if ($previousResponseId === 'resp_prev_beta' && ($mode === 'all-miss' || $accountId !== 'acct-beta')) {
+        $server->push($fd, '{"type":"error","error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id \'resp_prev_beta\' not found.","param":"previous_response_id"},"status":400}');
         return;
     }
 
-    $server->push($frame->fd, '{"type":"response.done","response":{"id":"resp_ws_done"}}');
-    if ($disconnectAfterResponse) {
-        $server->disconnect($frame->fd, SWOOLE_WEBSOCKET_CLOSE_NORMAL, 'done');
+    if ($previousResponseId === 'resp_prev_beta') {
+        $server->push($fd, '{"type":"response.completed","response":{"id":"resp_beta_next"}}');
+        return;
     }
+
+    $suffix = str_replace('acct-', '', $accountId);
+    $server->push($fd, '{"type":"response.completed","response":{"id":"resp_' . $suffix . '_fresh"}}');
 });
 $server->on('close', static function (Server $server, int $fd) use (&$connectionsByFd): void {
     unset($connectionsByFd[$fd]);

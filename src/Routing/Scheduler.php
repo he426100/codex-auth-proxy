@@ -53,10 +53,29 @@ final class Scheduler
         }
     }
 
-    public function accountForSession(string $sessionKey, ?string $fallbackSessionKey = null, array &$selection = []): CodexAccount
+    public function accountForSession(string $sessionKey, ?string $fallbackSessionKey = null, array &$selection = [], ?string $preferredAccountId = null): CodexAccount
     {
         $snapshot = $this->candidateSnapshot();
         $boundAccountId = $this->state->sessionAccount($sessionKey);
+        if ($preferredAccountId !== null) {
+            $preferred = $this->accountsById[$preferredAccountId] ?? null;
+            if ($preferred !== null && $this->isAvailableInSnapshot($snapshot, $preferred->accountId())) {
+                if ($boundAccountId === $preferred->accountId()) {
+                    $this->state->touchSession($sessionKey, $this->now());
+                    $selection = $this->selectionReport('bound_session', $preferred);
+                    return $preferred;
+                }
+
+                $source = $boundAccountId !== null ? 'rebind_response_affinity' : 'response_affinity';
+                $this->state->bindSession($sessionKey, $preferred->accountId(), $source, $this->now());
+                $selection = $this->selectionReport($source, $preferred, $boundAccountId !== null ? [
+                    'previous_account_id' => $boundAccountId,
+                ] : []);
+
+                return $preferred;
+            }
+        }
+
         if ($boundAccountId !== null) {
             $bound = $this->accountsById[$boundAccountId] ?? null;
             if ($bound !== null && $this->isAvailableInSnapshot($snapshot, $bound->accountId())) {
@@ -128,7 +147,7 @@ final class Scheduler
         }
 
         $orderedCandidates = [];
-        $replacement = $this->selectAvailable($failedAccountId, null, $orderedCandidates, false);
+        $replacement = $this->selectAvailable($failedAccountId !== null ? [$failedAccountId] : [], null, $orderedCandidates, false);
         $source = 'hard_switch';
         $this->state->bindSession($sessionKey, $replacement->accountId(), $source, $this->now());
         $selection = $this->selectionReport($source, $replacement, [
@@ -136,6 +155,34 @@ final class Scheduler
             'excluded_account_id' => $failedAccountId,
             'cooldown_reason' => $cooldownReason,
         ], $orderedCandidates);
+
+        return $replacement;
+    }
+
+    /** @param list<string> $excludeAccountIds */
+    public function switchAfterSoftFailure(string $sessionKey, array $excludeAccountIds = [], string $source = 'soft_switch', array &$selection = []): CodexAccount
+    {
+        $failedAccountId = $this->state->sessionAccount($sessionKey);
+        $excluded = [];
+        foreach ($excludeAccountIds as $accountId) {
+            if ($accountId === '') {
+                continue;
+            }
+            $excluded[$accountId] = true;
+        }
+
+        $orderedCandidates = [];
+        $replacement = $this->selectAvailable(array_keys($excluded), null, $orderedCandidates, false);
+        $this->state->bindSession($sessionKey, $replacement->accountId(), $source, $this->now());
+
+        $context = [];
+        if ($failedAccountId !== null) {
+            $context['previous_account_id'] = $failedAccountId;
+            if (isset($excluded[$failedAccountId])) {
+                $context['excluded_account_id'] = $failedAccountId;
+            }
+        }
+        $selection = $this->selectionReport($source, $replacement, $context, $orderedCandidates);
 
         return $replacement;
     }
@@ -176,7 +223,7 @@ final class Scheduler
      * }> $orderedCandidates
      */
     private function selectAvailable(
-        ?string $excludeAccountId = null,
+        array $excludeAccountIds = [],
         ?array $snapshot = null,
         array &$orderedCandidates = [],
         bool $roundRobinWithinPriority = false,
@@ -194,7 +241,7 @@ final class Scheduler
             if ($entry === null) {
                 continue;
             }
-            if ($entry['account']->accountId() === $excludeAccountId) {
+            if (in_array($entry['account']->accountId(), $excludeAccountIds, true)) {
                 continue;
             }
 

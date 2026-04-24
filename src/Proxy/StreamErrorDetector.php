@@ -48,6 +48,27 @@ final class StreamErrorDetector
         return json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
     }
 
+    public static function jsonErrorStatus(string $payload): ?int
+    {
+        $decoded = self::decodeJsonPayload($payload);
+        if ($decoded === null) {
+            return null;
+        }
+
+        if (!isset($decoded['error']) && ($decoded['type'] ?? null) !== 'error') {
+            return null;
+        }
+
+        $status = $decoded['status'] ?? ($decoded['error']['status'] ?? null);
+        if (!is_int($status) && !is_string($status)) {
+            return null;
+        }
+
+        $status = (int) $status;
+
+        return $status > 0 ? $status : null;
+    }
+
     public static function isCompletedFrame(string $frame): bool
     {
         $decoded = self::decodeSsePayload($frame);
