@@ -250,6 +250,18 @@ final class StateStore
         });
     }
 
+    public function consumeCursor(): int
+    {
+        $current = 0;
+        $this->update(function (array &$state) use (&$current): void {
+            $value = $state['cursor'] ?? 0;
+            $current = is_int($value) ? max(0, $value) : 0;
+            $state['cursor'] = $current + 1;
+        });
+
+        return $current;
+    }
+
     public function candidateRevision(): string
     {
         $this->reload();

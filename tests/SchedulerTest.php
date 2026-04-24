@@ -237,6 +237,90 @@ final class SchedulerTest extends TestCase
         ], $state->sessionBinding('thread-best-quota'));
     }
 
+    public function testRoundRobinsNewSessionsAcrossConfirmedAvailableAccounts(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha')),
+            $validator->validate($this->accountFixture('beta')),
+            $validator->validate($this->accountFixture('gamma')),
+        ];
+        $state = StateStore::memory();
+        $state->setAccountUsage('acct-alpha', new CachedAccountUsage(
+            'plus',
+            1000,
+            null,
+            new CachedRateLimitWindow(10.0, 90.0, 300, 1300),
+            new CachedRateLimitWindow(10.0, 90.0, 3600, 4600),
+        ));
+        $state->setAccountUsage('acct-beta', new CachedAccountUsage(
+            'plus',
+            1000,
+            null,
+            new CachedRateLimitWindow(20.0, 80.0, 300, 1300),
+            new CachedRateLimitWindow(20.0, 80.0, 3600, 4600),
+        ));
+        $state->setAccountUsage('acct-gamma', new CachedAccountUsage(
+            'plus',
+            1000,
+            null,
+            new CachedRateLimitWindow(30.0, 70.0, 300, 1300),
+            new CachedRateLimitWindow(30.0, 70.0, 3600, 4600),
+        ));
+        $scheduler = new Scheduler($accounts, $state, static fn (): int => 1000);
+
+        $first = $scheduler->accountForSession('thread-rotate-1');
+        $second = $scheduler->accountForSession('thread-rotate-2');
+        $third = $scheduler->accountForSession('thread-rotate-3');
+        $fourth = $scheduler->accountForSession('thread-rotate-4');
+
+        self::assertSame('acct-alpha', $first->accountId());
+        self::assertSame('acct-beta', $second->accountId());
+        self::assertSame('acct-gamma', $third->accountId());
+        self::assertSame('acct-alpha', $fourth->accountId());
+    }
+
+    public function testRoundRobinsOnlyWithinBestPriorityTierForNewSessions(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha')),
+            $validator->validate($this->accountFixture('beta')),
+            $validator->validate($this->accountFixture('gamma')),
+        ];
+        $state = StateStore::memory();
+        $state->setAccountUsage('acct-alpha', new CachedAccountUsage(
+            'plus',
+            1000,
+            null,
+            new CachedRateLimitWindow(10.0, 90.0, 300, 1300),
+            new CachedRateLimitWindow(10.0, 90.0, 3600, 4600),
+        ));
+        $state->setAccountUsage('acct-beta', new CachedAccountUsage(
+            'plus',
+            1000,
+            null,
+            new CachedRateLimitWindow(20.0, 80.0, 300, 1300),
+            new CachedRateLimitWindow(20.0, 80.0, 3600, 4600),
+        ));
+        $state->setAccountUsage('acct-gamma', new CachedAccountUsage(
+            'plus',
+            1000,
+            'upstream unavailable',
+            null,
+            null,
+        ));
+        $scheduler = new Scheduler($accounts, $state, static fn (): int => 1000);
+
+        $first = $scheduler->accountForSession('thread-tier-1');
+        $second = $scheduler->accountForSession('thread-tier-2');
+        $third = $scheduler->accountForSession('thread-tier-3');
+
+        self::assertSame('acct-alpha', $first->accountId());
+        self::assertSame('acct-beta', $second->accountId());
+        self::assertSame('acct-alpha', $third->accountId());
+    }
+
     public function testKeepsBoundSessionWhenQuotaRankingChanges(): void
     {
         $validator = new AccountFileValidator();
@@ -370,9 +454,12 @@ final class SchedulerTest extends TestCase
             new CachedRateLimitWindow(85.0, 15.0, 3600, 4601),
         ));
 
-        $second = $scheduler->accountForSession('thread-snapshot-second');
+        $selection = [];
+        $second = $scheduler->accountForSession('thread-snapshot-second', null, $selection);
 
-        self::assertSame('acct-alpha', $second->accountId());
+        self::assertSame('acct-beta', $second->accountId());
+        self::assertSame('acct-alpha', $selection['candidates'][0]['account_id']);
+        self::assertSame('acct-beta', $selection['candidates'][1]['account_id']);
     }
 
     public function testDoesNotSkipExhaustedAccountsAfterRefreshError(): void

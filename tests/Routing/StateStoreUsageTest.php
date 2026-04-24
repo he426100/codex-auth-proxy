@@ -179,6 +179,18 @@ final class StateStoreUsageTest extends TestCase
         self::assertSame(7.0, $reloaded->accountUsage('acct-alpha')?->primary?->leftPercent);
     }
 
+    public function testConsumesCursorAcrossFileBackedInstances(): void
+    {
+        $dir = $this->tempDir('cap-state');
+        $path = $dir . '/state.json';
+        $first = StateStore::file($path);
+        $second = StateStore::file($path);
+
+        self::assertSame(0, $first->consumeCursor());
+        self::assertSame(1, $second->consumeCursor());
+        self::assertSame(2, StateStore::file($path)->cursor());
+    }
+
     public function testSameInstanceReloadsWhenExternalWriterReplacesStateFile(): void
     {
         $dir = $this->tempDir('cap-state');

@@ -80,7 +80,7 @@ final class Scheduler
         }
 
         $orderedCandidates = [];
-        $account = $this->selectAvailable(snapshot: $snapshot, orderedCandidates: $orderedCandidates);
+        $account = $this->selectAvailable(snapshot: $snapshot, orderedCandidates: $orderedCandidates, roundRobinWithinPriority: true);
         $source = $boundAccountId !== null ? 'rebind_unavailable_session' : 'new_session';
         $this->state->bindSession($sessionKey, $account->accountId(), $source, $this->now());
         $selection = $this->selectionReport(
@@ -128,7 +128,7 @@ final class Scheduler
         }
 
         $orderedCandidates = [];
-        $replacement = $this->selectAvailable($failedAccountId, null, $orderedCandidates);
+        $replacement = $this->selectAvailable($failedAccountId, null, $orderedCandidates, false);
         $source = 'hard_switch';
         $this->state->bindSession($sessionKey, $replacement->accountId(), $source, $this->now());
         $selection = $this->selectionReport($source, $replacement, [
@@ -175,7 +175,12 @@ final class Scheduler
      *   quota_score:?float
      * }> $orderedCandidates
      */
-    private function selectAvailable(?string $excludeAccountId = null, ?array $snapshot = null, array &$orderedCandidates = []): CodexAccount
+    private function selectAvailable(
+        ?string $excludeAccountId = null,
+        ?array $snapshot = null,
+        array &$orderedCandidates = [],
+        bool $roundRobinWithinPriority = false,
+    ): CodexAccount
     {
         $count = count($this->accounts);
         if ($count === 0) {
@@ -183,10 +188,8 @@ final class Scheduler
         }
 
         $snapshot ??= $this->candidateSnapshot();
-        $start = $this->state->cursor() % $count;
         $candidates = [];
-        for ($offset = 0; $offset < $count; $offset++) {
-            $index = ($start + $offset) % $count;
+        for ($index = 0; $index < $count; $index++) {
             $entry = $snapshot['by_index'][$index] ?? null;
             if ($entry === null) {
                 continue;
@@ -195,7 +198,7 @@ final class Scheduler
                 continue;
             }
 
-            $candidates[] = $entry + ['rotation' => $offset];
+            $candidates[] = $entry;
         }
 
         if ($candidates === []) {
@@ -203,12 +206,17 @@ final class Scheduler
         }
 
         usort($candidates, fn (array $left, array $right): int => $this->compareCandidates($left, $right));
+        $preferredCandidates = $this->preferredCandidates($candidates);
         $orderedCandidates = [];
         foreach ($candidates as $candidate) {
             $orderedCandidates[] = $this->candidateTrace($candidate);
         }
-        $selected = $candidates[0];
-        $this->state->setCursor($selected['index'] + 1);
+        if (!$roundRobinWithinPriority) {
+            return $preferredCandidates[0]['account'];
+        }
+
+        $cursor = $this->state->consumeCursor();
+        $selected = $preferredCandidates[$cursor % count($preferredCandidates)];
 
         return $selected['account'];
     }
@@ -317,7 +325,7 @@ final class Scheduler
         return min($usage->primary->leftPercent, $usage->secondary->leftPercent);
     }
 
-    /** @param array{availability:AccountAvailability,low_quota:bool,quota_score:?float,rotation:int} $candidate */
+    /** @param array{availability:AccountAvailability,low_quota:bool,quota_score:?float} $candidate */
     private function candidatePriority(array $candidate): int
     {
         if ($candidate['low_quota']) {
@@ -331,8 +339,8 @@ final class Scheduler
     }
 
     /**
-     * @param array{availability:AccountAvailability,low_quota:bool,quota_score:?float,rotation:int} $left
-     * @param array{availability:AccountAvailability,low_quota:bool,quota_score:?float,rotation:int} $right
+     * @param array{index:int,availability:AccountAvailability,low_quota:bool,quota_score:?float} $left
+     * @param array{index:int,availability:AccountAvailability,low_quota:bool,quota_score:?float} $right
      */
     private function compareCandidates(array $left, array $right): int
     {
@@ -354,7 +362,33 @@ final class Scheduler
             return $rightScore <=> $leftScore;
         }
 
-        return $left['rotation'] <=> $right['rotation'];
+        return $left['index'] <=> $right['index'];
+    }
+
+    /**
+     * @param list<array{
+     *   index:int,
+     *   account:CodexAccount,
+     *   availability:AccountAvailability,
+     *   low_quota:bool,
+     *   quota_score:?float
+     * }> $candidates
+     * @return list<array{
+     *   index:int,
+     *   account:CodexAccount,
+     *   availability:AccountAvailability,
+     *   low_quota:bool,
+     *   quota_score:?float
+     * }>
+     */
+    private function preferredCandidates(array $candidates): array
+    {
+        $bestPriority = $this->candidatePriority($candidates[0]);
+
+        return array_values(array_filter(
+            $candidates,
+            fn (array $candidate): bool => $this->candidatePriority($candidate) === $bestPriority,
+        ));
     }
 
     private function selectionReport(string $source, CodexAccount $account, array $context = [], array $candidates = []): array
