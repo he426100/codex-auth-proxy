@@ -42,12 +42,10 @@ final class CodexUsageClientTest extends TestCase
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
 
         $usage = (new CodexUsageClient(
-            'https://chatgpt.com/backend-api',
+            baseUrl: 'https://chatgpt.com/backend-api',
+            runtimeProfile: $this->runtimeProfile('codex-user-agent-test', 'beta-test', 'codex-originator-test', 'global'),
             timeoutSeconds: 2,
             http: new Client(['handler' => $stack]),
-            originator: 'codex-originator-test',
-            userAgent: 'codex-user-agent-test',
-            residency: 'global',
         ))->fetch($account);
 
         self::assertSame('plus', $usage->planType);
@@ -81,7 +79,8 @@ final class CodexUsageClientTest extends TestCase
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
 
         (new CodexUsageClient(
-            'https://chatgpt.com/backend-api',
+            baseUrl: 'https://chatgpt.com/backend-api',
+            runtimeProfile: $this->runtimeProfile(),
             timeoutSeconds: 2,
             proxyEnv: [
                 'HTTP_PROXY' => 'http://proxy.local:8080',
@@ -115,7 +114,8 @@ final class CodexUsageClientTest extends TestCase
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
 
         (new CodexUsageClient(
-            'https://chatgpt.com/backend-api',
+            baseUrl: 'https://chatgpt.com/backend-api',
+            runtimeProfile: $this->runtimeProfile(),
             timeoutSeconds: 2,
             proxyEnv: [
                 'HTTP_PROXY' => 'http://proxy.local:8080',
@@ -162,7 +162,8 @@ final class CodexUsageClientTest extends TestCase
             }
 
             (new CodexUsageClient(
-                'https://chatgpt.com/backend-api',
+                baseUrl: 'https://chatgpt.com/backend-api',
+                runtimeProfile: $this->runtimeProfile(),
                 timeoutSeconds: 2,
                 proxyEnv: ['NO_PROXY' => 'localhost'],
                 http: new Client(['handler' => $stack]),
@@ -196,7 +197,7 @@ final class CodexUsageClientTest extends TestCase
         $stack->push(Middleware::history($history));
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
 
-        (new CodexUsageClient('/usr/bin/codex', http: new Client(['handler' => $stack])))->fetch($account);
+        (new CodexUsageClient(baseUrl: '/usr/bin/codex', runtimeProfile: $this->runtimeProfile(), http: new Client(['handler' => $stack])))->fetch($account);
 
         /** @var array{request:Request} $transaction */
         $transaction = $history[0];
@@ -219,6 +220,7 @@ final class CodexUsageClientTest extends TestCase
 
         (new CodexUsageClient(
             baseUrl: 'https://proxy.example.test',
+            runtimeProfile: $this->runtimeProfile(),
             http: new Client(['handler' => $stack]),
         ))->fetch($account);
 
@@ -246,7 +248,7 @@ final class CodexUsageClientTest extends TestCase
         $this->expectExceptionMessage('token_invalidated');
         $this->expectExceptionMessage('req-1');
 
-        (new CodexUsageClient(http: $http))->fetch($account);
+        (new CodexUsageClient(baseUrl: 'https://chatgpt.com/backend-api', runtimeProfile: $this->runtimeProfile(), http: $http))->fetch($account);
     }
 
     public function testWrapsTransportFailures(): void
@@ -261,6 +263,6 @@ final class CodexUsageClientTest extends TestCase
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('usage endpoint request failed: network down');
 
-        (new CodexUsageClient(http: $http))->fetch($account);
+        (new CodexUsageClient(baseUrl: 'https://chatgpt.com/backend-api', runtimeProfile: $this->runtimeProfile(), http: $http))->fetch($account);
     }
 }

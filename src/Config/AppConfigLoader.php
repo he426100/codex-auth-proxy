@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CodexAuthProxy\Config;
 
+use CodexAuthProxy\Codex\CodexRuntimeProfile;
 use RuntimeException;
 use Symfony\Component\Config\Definition\Processor;
 
@@ -47,15 +48,20 @@ final class AppConfigLoader
                 ?? $this->intValue($defaults['callback_port'] ?? null),
             'callback_timeout_seconds' => $this->intValue($overrides['callback_timeout_seconds'] ?? null)
                 ?? $this->intValue($defaults['callback_timeout_seconds'] ?? null),
-            'codex_user_agent' => $this->stringValue($overrides['codex_user_agent'] ?? null)
-                ?? $this->stringValue($defaults['codex_user_agent'] ?? null),
-            'codex_beta_features' => $this->stringValue($overrides['codex_beta_features'] ?? null)
-                ?? $this->stringValue($defaults['codex_beta_features'] ?? null),
-            'codex_originator' => $this->stringValue($overrides['codex_originator'] ?? null)
-                ?? $this->stringValue($defaults['codex_originator'] ?? null),
-            'codex_residency' => $this->stringValue($overrides['codex_residency'] ?? null)
-                ?? $this->stringValue($defaults['codex_residency'] ?? null)
-                ?? '',
+            'codex_user_agent' => $this->stringValue($overrides['codex_user_agent'] ?? null, true)
+                ?? $this->stringValue($defaults['codex_user_agent'] ?? null, true)
+                ?? CodexRuntimeProfile::defaultUserAgent(),
+            'codex_beta_features' => $this->stringValue($overrides['codex_beta_features'] ?? null, true)
+                ?? $this->stringValue($defaults['codex_beta_features'] ?? null, true)
+                ?? CodexRuntimeProfile::defaultBetaFeatures(),
+            'codex_originator' => $this->stringValue($overrides['codex_originator'] ?? null, true)
+                ?? $this->stringValue($defaults['codex_originator'] ?? null, true)
+                ?? CodexRuntimeProfile::defaultOriginator(),
+            'codex_residency' => $this->stringValue($overrides['codex_residency'] ?? null, true)
+                ?? $this->stringValue($defaults['codex_residency'] ?? null, true)
+                ?? CodexRuntimeProfile::defaultResidency(),
+            'codex_upstream_base_url' => $this->stringValue($overrides['codex_upstream_base_url'] ?? null)
+                ?? $this->stringValue($defaults['codex_upstream_base_url'] ?? null),
             'usage_base_url' => $this->stringValue($overrides['usage_base_url'] ?? null)
                 ?? $this->stringValue($defaults['usage_base_url'] ?? null),
             'usage_refresh_interval_seconds' => $this->intValue($overrides['usage_refresh_interval_seconds'] ?? null)
@@ -86,9 +92,10 @@ final class AppConfigLoader
          *   callback_port:int,
          *   callback_timeout_seconds:int,
          *   codex_user_agent:string,
-         *   codex_beta_features:string,
+         *   codex_beta_features:?string,
          *   codex_originator:string,
-         *   codex_residency:string,
+         *   codex_residency:?string,
+         *   codex_upstream_base_url:string,
          *   usage_base_url:string,
          *   usage_refresh_interval_seconds:int,
          *   trace_mutations:bool,
@@ -111,9 +118,10 @@ final class AppConfigLoader
             $processed['callback_port'],
             $processed['callback_timeout_seconds'],
             $processed['codex_user_agent'],
-            $processed['codex_beta_features'],
+            $processed['codex_beta_features'] ?? CodexRuntimeProfile::defaultBetaFeatures(),
             $processed['codex_originator'],
-            $processed['codex_residency'],
+            $processed['codex_residency'] ?? CodexRuntimeProfile::defaultResidency(),
+            $processed['codex_upstream_base_url'],
             $processed['usage_base_url'],
             $processed['usage_refresh_interval_seconds'],
             $processed['trace_mutations'],
@@ -140,9 +148,18 @@ final class AppConfigLoader
         return $defaults;
     }
 
-    private function stringValue(mixed $value): ?string
+    private function stringValue(mixed $value, bool $allowEmpty = false): ?string
     {
-        return is_string($value) && trim($value) !== '' ? trim($value) : null;
+        if (!is_string($value)) {
+            return null;
+        }
+
+        $value = trim($value);
+        if ($value === '' && !$allowEmpty) {
+            return null;
+        }
+
+        return $value;
     }
 
     private function intValue(mixed $value): ?int

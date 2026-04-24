@@ -121,7 +121,7 @@ bin/codex-auth-proxy accounts status account-a
 
 `serve` 会在处理新请求前重读账号目录，因此 `accounts refresh`、`login`、`import` 或外部更新 `.account.json` 后，不需要重启代理进程就会生效。
 
-`status` 会为目标账号创建临时隔离的 `CODEX_HOME`，写入该账号的 `auth.json`，再调用本机 `codex app-server` 的 `account/rateLimits/read` 方法查询 Codex 额度。这样使用 Codex CLI 自己的额度读取逻辑，不依赖本项目猜测远端 usage URL。
+`status` 会直接调用 ChatGPT Codex usage endpoint，读取目标账号当前的计划和额度窗口。它与 `accounts refresh` 和 `serve` 的后台刷新共用同一套 direct usage 读取逻辑，不依赖 `codex app-server`。
 
 输出类似 Codex CLI `/status` 的关键信息：
 
@@ -218,8 +218,13 @@ CODEX_AUTH_PROXY_CALLBACK_PORT=1455
 CODEX_AUTH_PROXY_CALLBACK_TIMEOUT_SECONDS=300
 CODEX_AUTH_PROXY_ACCOUNTS_DIR=/home/me/.config/codex-auth-proxy/accounts
 CODEX_AUTH_PROXY_STATE_FILE=/home/me/.config/codex-auth-proxy/state.json
-CODEX_AUTH_PROXY_CODEX_USER_AGENT="codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0"
-CODEX_AUTH_PROXY_CODEX_BETA_FEATURES=multi_agent
+CODEX_AUTH_PROXY_CODEX_USER_AGENT="codex-auth-proxy/0.1.0"
+CODEX_AUTH_PROXY_CODEX_BETA_FEATURES=
+CODEX_AUTH_PROXY_CODEX_ORIGINATOR=codex-auth-proxy
+CODEX_AUTH_PROXY_CODEX_RESIDENCY=
+CODEX_AUTH_PROXY_CODEX_UPSTREAM_BASE_URL=https://chatgpt.com/backend-api/codex
+CODEX_AUTH_PROXY_USAGE_BASE_URL=https://chatgpt.com/backend-api
+CODEX_AUTH_PROXY_USAGE_REFRESH_INTERVAL_SECONDS=600
 CODEX_AUTH_PROXY_LOG_FILE=
 CODEX_AUTH_PROXY_LOG_LEVEL=warning
 CODEX_AUTH_PROXY_TRACE_FILE=
@@ -233,7 +238,9 @@ CODEX_AUTH_PROXY_NO_PROXY=localhost,127.0.0.1,::1
 
 本项目只读取上面的项目专用代理变量，不会把 shell 里的 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`、`ALL_PROXY` 或小写变体当作应用配置，避免系统环境变量意外改变本工具行为。
 
-出站代理配置会作用于 OAuth token exchange、token refresh、`serve` 上游 HTTP/SSE 和 WebSocket 连接，以及 `accounts status` / `accounts refresh` 调用 `codex app-server` 的路径。代理 URL 支持 `http://` 和 `socks5://`。对于 `codex app-server` 子进程，本工具会先清理 shell 环境里的标准代理变量，再把解析后的项目代理配置显式导出为标准 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 环境变量。
+`CODEX_AUTH_PROXY_CODEX_USER_AGENT`、`CODEX_AUTH_PROXY_CODEX_ORIGINATOR` 和 `CODEX_AUTH_PROXY_CODEX_BETA_FEATURES` 只在下游请求没有对应 header 时才作为 fallback 使用；如果 Codex CLI 已经发送这些 header，代理会原样透传。
+
+出站代理配置会作用于 OAuth token exchange、token refresh、`serve` 上游 HTTP/SSE 和 WebSocket 连接，以及 `accounts status` / `accounts refresh` / `serve` 后台刷新使用的 direct usage 请求。代理 URL 支持 `http://` 和 `socks5://`。
 
 `CODEX_AUTH_PROXY_NO_PROXY` 支持精确 host/IP、`localhost`、loopback 地址、带端口的 host、`*`，以及 `openai.com` 或 `.openai.com` 形式的域名后缀匹配。
 

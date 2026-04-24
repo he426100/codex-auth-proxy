@@ -7,6 +7,7 @@ namespace CodexAuthProxy\Console\Command;
 use CodexAuthProxy\Account\AccountRepository;
 use CodexAuthProxy\Account\CodexAccount;
 use CodexAuthProxy\Auth\TokenRefresher;
+use CodexAuthProxy\Codex\CodexRuntimeProfile;
 use CodexAuthProxy\Config\AppConfig;
 use CodexAuthProxy\Config\AppConfigLoader;
 use CodexAuthProxy\Network\OutboundProxyConfig;
@@ -205,12 +206,11 @@ final class AccountsCommand extends ProxyCommand
     {
         $accounts = $this->selectedAccounts($repository, $name);
         $outboundProxyConfig = OutboundProxyConfig::fromAppConfig($config);
+        $runtimeProfile = CodexRuntimeProfile::fromAppConfig($config);
         $client = $this->usageClient ?? new CodexUsageClient(
             baseUrl: $config->usageBaseUrl,
+            runtimeProfile: $runtimeProfile,
             proxyEnv: $outboundProxyConfig->environment(),
-            originator: $config->codexOriginator,
-            userAgent: $config->codexUserAgent,
-            residency: $config->codexResidency,
         );
         $state = StateStore::file($config->stateFile);
         $results = [];

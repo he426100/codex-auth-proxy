@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CodexAuthProxy\Tests;
 
+use CodexAuthProxy\Codex\CodexRuntimeProfile;
 use PHPUnit\Framework\TestCase as BaseTestCase;
 use RuntimeException;
 
@@ -70,5 +71,14 @@ abstract class TestCase extends BaseTestCase
         if (file_put_contents($path, $json) === false) {
             throw new RuntimeException('Failed to write JSON fixture');
         }
+    }
+
+    protected function runtimeProfile(
+        string $userAgent = 'codex-test-agent',
+        string $betaFeatures = 'beta-test',
+        string $originator = 'codex-test-originator',
+        string $residency = '',
+    ): CodexRuntimeProfile {
+        return new CodexRuntimeProfile($userAgent, $betaFeatures, $originator, $residency);
     }
 }

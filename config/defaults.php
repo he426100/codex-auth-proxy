@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use CodexAuthProxy\Codex\CodexProtocol;
+use CodexAuthProxy\Codex\CodexRuntimeProfile;
 use Symfony\Component\Dotenv\Dotenv;
 
 require_once dirname(__DIR__) . '/src/Config/env.php';
@@ -23,11 +25,12 @@ return [
     'callback_host' => env('CODEX_AUTH_PROXY_CALLBACK_HOST', 'localhost'),
     'callback_port' => (int) env('CODEX_AUTH_PROXY_CALLBACK_PORT', 1455),
     'callback_timeout_seconds' => (int) env('CODEX_AUTH_PROXY_CALLBACK_TIMEOUT_SECONDS', 300),
-    'codex_user_agent' => env('CODEX_AUTH_PROXY_CODEX_USER_AGENT', 'codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0'),
-    'codex_beta_features' => env('CODEX_AUTH_PROXY_CODEX_BETA_FEATURES', 'multi_agent'),
-    'codex_originator' => env('CODEX_AUTH_PROXY_CODEX_ORIGINATOR', 'codex-tui'),
-    'codex_residency' => env('CODEX_AUTH_PROXY_CODEX_RESIDENCY', ''),
-    'usage_base_url' => env('CODEX_AUTH_PROXY_USAGE_BASE_URL', 'https://chatgpt.com/backend-api'),
+    'codex_user_agent' => env('CODEX_AUTH_PROXY_CODEX_USER_AGENT', CodexRuntimeProfile::defaultUserAgent()),
+    'codex_beta_features' => env('CODEX_AUTH_PROXY_CODEX_BETA_FEATURES', CodexRuntimeProfile::defaultBetaFeatures()),
+    'codex_originator' => env('CODEX_AUTH_PROXY_CODEX_ORIGINATOR', CodexRuntimeProfile::defaultOriginator()),
+    'codex_residency' => env('CODEX_AUTH_PROXY_CODEX_RESIDENCY', CodexRuntimeProfile::defaultResidency()),
+    'codex_upstream_base_url' => env('CODEX_AUTH_PROXY_CODEX_UPSTREAM_BASE_URL', CodexProtocol::defaultUpstreamBaseUrl()),
+    'usage_base_url' => env('CODEX_AUTH_PROXY_USAGE_BASE_URL', CodexProtocol::defaultBackendBaseUrl()),
     'usage_refresh_interval_seconds' => (int) env('CODEX_AUTH_PROXY_USAGE_REFRESH_INTERVAL_SECONDS', 600),
     'trace_mutations' => env('CODEX_AUTH_PROXY_TRACE_MUTATIONS', true),
     'trace_timings' => env('CODEX_AUTH_PROXY_TRACE_TIMINGS', false),

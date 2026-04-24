@@ -13,7 +13,7 @@ final class UpstreamHeaderFactoryTest extends TestCase
     public function testBuildsCodexHeadersWithoutLeakingDownstreamAuthorization(): void
     {
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
-        $headers = (new UpstreamHeaderFactory('codex-cli-test', 'multi_agent', 'codex-originator-test'))->build([
+        $headers = (new UpstreamHeaderFactory($this->runtimeProfile('codex-cli-test', 'multi_agent', 'codex-originator-test')))->build([
             'authorization' => 'Bearer downstream',
             'host' => '127.0.0.1:1456',
             'accept' => 'application/json',
@@ -34,7 +34,7 @@ final class UpstreamHeaderFactoryTest extends TestCase
     public function testBuildsJsonAcceptHeaderForBufferedJsonEndpoints(): void
     {
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
-        $headers = (new UpstreamHeaderFactory('codex-cli-test', 'multi_agent'))->build(
+        $headers = (new UpstreamHeaderFactory($this->runtimeProfile('codex-cli-test', 'multi_agent')))->build(
             ['accept' => 'text/event-stream'],
             $account,
             'api.openai.com',
@@ -48,7 +48,7 @@ final class UpstreamHeaderFactoryTest extends TestCase
     public function testDoesNotInjectDefaultBetaFeaturesOnHttpRequests(): void
     {
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
-        $headers = (new UpstreamHeaderFactory('codex-cli-test', 'multi_agent'))->build([], $account, 'api.openai.com', false);
+        $headers = (new UpstreamHeaderFactory($this->runtimeProfile('codex-cli-test', 'multi_agent')))->build([], $account, 'api.openai.com', false);
 
         self::assertArrayNotHasKey('X-Codex-Beta-Features', $headers);
     }
@@ -56,7 +56,7 @@ final class UpstreamHeaderFactoryTest extends TestCase
     public function testBuildsCodexWebSocketHeaders(): void
     {
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
-        $factory = new UpstreamHeaderFactory('codex-cli-test', 'multi_agent', 'codex-originator-test');
+        $factory = new UpstreamHeaderFactory($this->runtimeProfile('codex-cli-test', 'multi_agent', 'codex-originator-test'));
         $headers = $factory->build([
             'user-agent' => 'downstream-agent',
             'originator' => 'downstream-originator',

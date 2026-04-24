@@ -22,18 +22,13 @@ final class CodexProxyServerTest extends TestCase
 {
     public function testClientOptionsIncludeConfiguredProxyForUpstreamHost(): void
     {
-        $server = new CodexProxyServer(
-            host: '127.0.0.1',
-            port: 1456,
-            accountsDir: '/tmp/accounts',
-            stateFile: '/tmp/state.json',
-            defaultCooldownSeconds: 18000,
-            outboundProxyConfig: OutboundProxyConfig::fromAppConfig($this->config(
+        $server = $this->server([
+            'outboundProxyConfig' => OutboundProxyConfig::fromAppConfig($this->config(
                 httpProxy: 'http://proxy.local:8080',
                 httpsProxy: 'http://secure-proxy.local:8443',
                 noProxy: 'localhost',
             )),
-        );
+        ]);
 
         $options = $this->clientOptionsFor($server, 'chatgpt.com', ['timeout' => -1]);
 
@@ -45,18 +40,13 @@ final class CodexProxyServerTest extends TestCase
 
     public function testClientOptionsIncludeConfiguredSocks5ProxyForUpstreamHost(): void
     {
-        $server = new CodexProxyServer(
-            host: '127.0.0.1',
-            port: 1456,
-            accountsDir: '/tmp/accounts',
-            stateFile: '/tmp/state.json',
-            defaultCooldownSeconds: 18000,
-            outboundProxyConfig: OutboundProxyConfig::fromAppConfig($this->config(
+        $server = $this->server([
+            'outboundProxyConfig' => OutboundProxyConfig::fromAppConfig($this->config(
                 httpProxy: 'socks5://user:pass@proxy.local:1080',
                 httpsProxy: null,
                 noProxy: 'localhost',
             )),
-        );
+        ]);
 
         $options = $this->clientOptionsFor($server, 'chatgpt.com', ['timeout' => -1]);
 
@@ -70,18 +60,13 @@ final class CodexProxyServerTest extends TestCase
 
     public function testClientOptionsBypassProxyForNoProxyHost(): void
     {
-        $server = new CodexProxyServer(
-            host: '127.0.0.1',
-            port: 1456,
-            accountsDir: '/tmp/accounts',
-            stateFile: '/tmp/state.json',
-            defaultCooldownSeconds: 18000,
-            outboundProxyConfig: OutboundProxyConfig::fromAppConfig($this->config(
+        $server = $this->server([
+            'outboundProxyConfig' => OutboundProxyConfig::fromAppConfig($this->config(
                 httpProxy: 'http://proxy.local:8080',
                 httpsProxy: 'http://secure-proxy.local:8443',
                 noProxy: 'chatgpt.com',
             )),
-        );
+        ]);
 
         $options = $this->clientOptionsFor($server, 'chatgpt.com', ['timeout' => -1]);
 
@@ -94,14 +79,9 @@ final class CodexProxyServerTest extends TestCase
     public function testRecordsTraceForUpstreamError(): void
     {
         [$traceFile, $traceLogger] = $this->traceLogger('proxy-trace');
-        $server = new CodexProxyServer(
-            host: '127.0.0.1',
-            port: 1456,
-            accountsDir: '/tmp/accounts',
-            stateFile: '/tmp/state.json',
-            defaultCooldownSeconds: 18000,
-            requestTraceLogger: $traceLogger,
-        );
+        $server = $this->server([
+            'requestTraceLogger' => $traceLogger,
+        ]);
 
         $method = new ReflectionMethod(CodexProxyServer::class, 'traceUpstreamError');
         $method->invoke(
@@ -129,14 +109,9 @@ final class CodexProxyServerTest extends TestCase
     public function testRecordsTraceForWebSocketStreamError(): void
     {
         [$traceFile, $traceLogger] = $this->traceLogger('proxy-websocket-trace');
-        $server = new CodexProxyServer(
-            host: '127.0.0.1',
-            port: 1456,
-            accountsDir: '/tmp/accounts',
-            stateFile: '/tmp/state.json',
-            defaultCooldownSeconds: 18000,
-            requestTraceLogger: $traceLogger,
-        );
+        $server = $this->server([
+            'requestTraceLogger' => $traceLogger,
+        ]);
 
         $method = new ReflectionMethod(CodexProxyServer::class, 'traceWebSocketStreamError');
         $method->invoke(
@@ -162,14 +137,9 @@ final class CodexProxyServerTest extends TestCase
     public function testRecordsTraceForPayloadMutations(): void
     {
         [$traceFile, $traceLogger] = $this->traceLogger('proxy-mutation-trace');
-        $server = new CodexProxyServer(
-            host: '127.0.0.1',
-            port: 1456,
-            accountsDir: '/tmp/accounts',
-            stateFile: '/tmp/state.json',
-            defaultCooldownSeconds: 18000,
-            requestTraceLogger: $traceLogger,
-        );
+        $server = $this->server([
+            'requestTraceLogger' => $traceLogger,
+        ]);
 
         $method = new ReflectionMethod(CodexProxyServer::class, 'tracePayloadMutations');
         $method->invoke(
@@ -192,15 +162,10 @@ final class CodexProxyServerTest extends TestCase
     public function testSkipsTraceForPayloadMutationsWhenDisabled(): void
     {
         [$traceFile, $traceLogger] = $this->traceLogger('proxy-mutation-trace-disabled');
-        $server = new CodexProxyServer(
-            host: '127.0.0.1',
-            port: 1456,
-            accountsDir: '/tmp/accounts',
-            stateFile: '/tmp/state.json',
-            defaultCooldownSeconds: 18000,
-            requestTraceLogger: $traceLogger,
-            traceMutations: false,
-        );
+        $server = $this->server([
+            'requestTraceLogger' => $traceLogger,
+            'traceMutations' => false,
+        ]);
 
         $method = new ReflectionMethod(CodexProxyServer::class, 'tracePayloadMutations');
         $method->invoke(
@@ -217,15 +182,10 @@ final class CodexProxyServerTest extends TestCase
     public function testRecordsTraceForRequestTimingsWhenEnabled(): void
     {
         [$traceFile, $traceLogger] = $this->traceLogger('proxy-timing-trace');
-        $server = new CodexProxyServer(
-            host: '127.0.0.1',
-            port: 1456,
-            accountsDir: '/tmp/accounts',
-            stateFile: '/tmp/state.json',
-            defaultCooldownSeconds: 18000,
-            requestTraceLogger: $traceLogger,
-            traceTimings: true,
-        );
+        $server = $this->server([
+            'requestTraceLogger' => $traceLogger,
+            'traceTimings' => true,
+        ]);
 
         $method = new ReflectionMethod(CodexProxyServer::class, 'traceRequestTiming');
         $method->invoke(
@@ -259,15 +219,10 @@ final class CodexProxyServerTest extends TestCase
     public function testSkipsTraceForRequestTimingsWhenDisabled(): void
     {
         [$traceFile, $traceLogger] = $this->traceLogger('proxy-timing-trace-disabled');
-        $server = new CodexProxyServer(
-            host: '127.0.0.1',
-            port: 1456,
-            accountsDir: '/tmp/accounts',
-            stateFile: '/tmp/state.json',
-            defaultCooldownSeconds: 18000,
-            requestTraceLogger: $traceLogger,
-            traceTimings: false,
-        );
+        $server = $this->server([
+            'requestTraceLogger' => $traceLogger,
+            'traceTimings' => false,
+        ]);
 
         $method = new ReflectionMethod(CodexProxyServer::class, 'traceRequestTiming');
         $method->invoke(
@@ -325,13 +280,9 @@ final class CodexProxyServerTest extends TestCase
             ],
         ]);
 
-        $server = new CodexProxyServer(
-            host: '127.0.0.1',
-            port: 1456,
-            accountsDir: $accountsDir,
-            stateFile: '/tmp/state.json',
-            defaultCooldownSeconds: 18000,
-        );
+        $server = $this->server([
+            'accountsDir' => $accountsDir,
+        ]);
         $method = new ReflectionMethod(CodexProxyServer::class, 'syncSchedulerAccounts');
         $method->invoke($server, new AccountRepository($accountsDir), $scheduler);
 
@@ -342,13 +293,7 @@ final class CodexProxyServerTest extends TestCase
 
     public function testBuildsStructuredProxyUnavailablePayload(): void
     {
-        $server = new CodexProxyServer(
-            host: '127.0.0.1',
-            port: 1456,
-            accountsDir: '/tmp/accounts',
-            stateFile: '/tmp/state.json',
-            defaultCooldownSeconds: 18000,
-        );
+        $server = $this->server();
 
         $method = new ReflectionMethod(CodexProxyServer::class, 'proxyUnavailablePayload');
         $payload = json_decode((string) $method->invoke($server, 'No Codex accounts configured'), true, flags: JSON_THROW_ON_ERROR);
@@ -361,13 +306,7 @@ final class CodexProxyServerTest extends TestCase
 
     public function testShutdownCleanupUsesSwooleShutdownEvent(): void
     {
-        $server = new CodexProxyServer(
-            host: '127.0.0.1',
-            port: 1456,
-            accountsDir: '/tmp/accounts',
-            stateFile: '/tmp/state.json',
-            defaultCooldownSeconds: 18000,
-        );
+        $server = $this->server();
         $method = new ReflectionMethod(CodexProxyServer::class, 'shutdownEvent');
 
         self::assertSame('shutdown', $method->invoke($server));
@@ -396,6 +335,23 @@ final class CodexProxyServerTest extends TestCase
             refreshToken: 'refresh-token',
             enabled: true,
         );
+    }
+
+    /** @param array<string,mixed> $overrides */
+    private function server(array $overrides = []): CodexProxyServer
+    {
+        $defaults = [
+            'host' => '127.0.0.1',
+            'port' => 1456,
+            'accountsDir' => '/tmp/accounts',
+            'stateFile' => '/tmp/state.json',
+            'defaultCooldownSeconds' => 18000,
+            'upstreamBase' => 'https://chatgpt.com/backend-api/codex',
+            'runtimeProfile' => $this->runtimeProfile(),
+            'usageBaseUrl' => 'https://chatgpt.com/backend-api',
+        ];
+
+        return new CodexProxyServer(...array_replace($defaults, $overrides));
     }
 
     /** @return array{0:string,1:RequestTraceLogger} */
@@ -437,6 +393,7 @@ final class CodexProxyServerTest extends TestCase
             codexBetaFeatures: 'multi_agent',
             codexOriginator: 'codex-tui',
             codexResidency: '',
+            codexUpstreamBaseUrl: 'https://chatgpt.com/backend-api/codex',
             usageBaseUrl: 'https://chatgpt.com/backend-api',
             usageRefreshIntervalSeconds: 600,
             traceMutations: true,

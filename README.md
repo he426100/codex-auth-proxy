@@ -160,10 +160,11 @@ CODEX_AUTH_PROXY_CALLBACK_PORT=1455
 CODEX_AUTH_PROXY_CALLBACK_TIMEOUT_SECONDS=300
 CODEX_AUTH_PROXY_ACCOUNTS_DIR=/home/me/.config/codex-auth-proxy/accounts
 CODEX_AUTH_PROXY_STATE_FILE=/home/me/.config/codex-auth-proxy/state.json
-CODEX_AUTH_PROXY_CODEX_USER_AGENT="codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0"
-CODEX_AUTH_PROXY_CODEX_BETA_FEATURES=multi_agent
-CODEX_AUTH_PROXY_CODEX_ORIGINATOR=codex-tui
+CODEX_AUTH_PROXY_CODEX_USER_AGENT="codex-auth-proxy/0.1.0"
+CODEX_AUTH_PROXY_CODEX_BETA_FEATURES=
+CODEX_AUTH_PROXY_CODEX_ORIGINATOR=codex-auth-proxy
 CODEX_AUTH_PROXY_CODEX_RESIDENCY=
+CODEX_AUTH_PROXY_CODEX_UPSTREAM_BASE_URL=https://chatgpt.com/backend-api/codex
 CODEX_AUTH_PROXY_USAGE_BASE_URL=https://chatgpt.com/backend-api
 CODEX_AUTH_PROXY_USAGE_REFRESH_INTERVAL_SECONDS=600
 CODEX_AUTH_PROXY_LOG_FILE=
@@ -178,6 +179,8 @@ CODEX_AUTH_PROXY_NO_PROXY=localhost,127.0.0.1,::1
 ```
 
 The project intentionally reads only the namespaced proxy variables above. It does not treat shell-level `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, or lowercase variants as application configuration.
+
+`CODEX_AUTH_PROXY_CODEX_USER_AGENT`, `CODEX_AUTH_PROXY_CODEX_ORIGINATOR`, and `CODEX_AUTH_PROXY_CODEX_BETA_FEATURES` are only fallback values. When Codex CLI sends those headers itself, the proxy forwards the downstream values unchanged.
 
 Outbound proxy settings are applied to OAuth token exchange, token refresh, `serve` upstream HTTP/SSE and WebSocket connections, and direct usage reads from `accounts status`, `accounts refresh`, and the `serve` background refresher. Proxy URLs support `http://` and `socks5://`.
 

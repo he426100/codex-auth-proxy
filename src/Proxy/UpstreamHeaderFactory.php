@@ -5,16 +5,13 @@ declare(strict_types=1);
 namespace CodexAuthProxy\Proxy;
 
 use CodexAuthProxy\Account\CodexAccount;
+use CodexAuthProxy\Codex\CodexProtocol;
+use CodexAuthProxy\Codex\CodexRuntimeProfile;
 
 final class UpstreamHeaderFactory
 {
-    private const WEBSOCKET_BETA = 'responses_websockets=2026-02-06';
-
     public function __construct(
-        private readonly string $userAgent = '',
-        private readonly string $betaFeatures = '',
-        private readonly string $originator = 'codex-tui',
-        private readonly string $residency = '',
+        private readonly CodexRuntimeProfile $runtimeProfile,
     )
     {
     }
@@ -78,7 +75,7 @@ final class UpstreamHeaderFactory
     {
         $betaFeatures = $this->headerValue($downstreamHeaders, 'x-codex-beta-features');
         if ($betaFeatures === null && $websocket) {
-            $betaFeatures = $this->betaFeatures;
+            $betaFeatures = $this->runtimeProfile->betaFeatures;
         }
         if ($betaFeatures !== null && $betaFeatures !== '') {
             $headers['X-Codex-Beta-Features'] = $betaFeatures;
@@ -101,14 +98,14 @@ final class UpstreamHeaderFactory
             }
         }
 
-        $headers['Originator'] = $this->headerValue($downstreamHeaders, 'originator') ?? $this->originator;
+        $headers['Originator'] = $this->headerValue($downstreamHeaders, 'originator') ?? $this->runtimeProfile->originator;
         $headers['ChatGPT-Account-ID'] = $account->accountId();
-        $residency = $this->headerValue($downstreamHeaders, 'x-openai-internal-codex-residency') ?? $this->residency;
+        $residency = $this->headerValue($downstreamHeaders, 'x-openai-internal-codex-residency') ?? $this->runtimeProfile->residency;
         if ($residency !== '') {
             $headers['x-openai-internal-codex-residency'] = $residency;
         }
 
-        $userAgent = $this->headerValue($downstreamHeaders, 'user-agent') ?? $this->userAgent;
+        $userAgent = $this->headerValue($downstreamHeaders, 'user-agent') ?? $this->runtimeProfile->userAgent;
         if ($userAgent !== '') {
             $headers['User-Agent'] = $userAgent;
         }
@@ -143,6 +140,6 @@ final class UpstreamHeaderFactory
             return $downstream;
         }
 
-        return self::WEBSOCKET_BETA;
+        return CodexProtocol::responsesWebsocketBetaHeader();
     }
 }

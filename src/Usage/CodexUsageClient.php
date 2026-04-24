@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace CodexAuthProxy\Usage;
 
 use CodexAuthProxy\Account\CodexAccount;
+use CodexAuthProxy\Codex\CodexProtocol;
+use CodexAuthProxy\Codex\CodexRuntimeProfile;
 use GuzzleHttp\Client;
 use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\GuzzleException;
@@ -20,14 +22,12 @@ final class CodexUsageClient implements UsageClient
 
     /** @param array<string,string> $proxyEnv */
     public function __construct(
-        private readonly string $baseUrl = 'https://chatgpt.com/backend-api',
+        private readonly string $baseUrl,
+        private readonly CodexRuntimeProfile $runtimeProfile,
         ?UsageResponseParser $parser = null,
         private readonly int $timeoutSeconds = 30,
         private readonly array $proxyEnv = [],
         ?ClientInterface $http = null,
-        private readonly string $originator = 'codex-tui',
-        private readonly string $userAgent = 'codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0',
-        private readonly string $residency = '',
     ) {
         $this->proxy = $this->proxyOptions();
         $options = [
@@ -78,14 +78,14 @@ final class CodexUsageClient implements UsageClient
             'ChatGPT-Account-ID' => $account->accountId(),
         ];
 
-        if ($this->originator !== '') {
-            $headers['originator'] = $this->originator;
+        if ($this->runtimeProfile->originator !== '') {
+            $headers['originator'] = $this->runtimeProfile->originator;
         }
-        if ($this->userAgent !== '') {
-            $headers['User-Agent'] = $this->userAgent;
+        if ($this->runtimeProfile->userAgent !== '') {
+            $headers['User-Agent'] = $this->runtimeProfile->userAgent;
         }
-        if ($this->residency !== '') {
-            $headers['x-openai-internal-codex-residency'] = $this->residency;
+        if ($this->runtimeProfile->residency !== '') {
+            $headers['x-openai-internal-codex-residency'] = $this->runtimeProfile->residency;
         }
 
         return $headers;
@@ -93,17 +93,7 @@ final class CodexUsageClient implements UsageClient
 
     private function usageEndpoint(): string
     {
-        $base = rtrim($this->usageBaseUrl(), '/');
-        $host = parse_url($base, PHP_URL_HOST);
-        if (is_string($host) && in_array($host, ['chatgpt.com', 'chat.openai.com'], true) && !str_contains($base, '/backend-api')) {
-            $base .= '/backend-api';
-        }
-
-        if (str_contains($base, '/backend-api')) {
-            return $base . '/wham/usage';
-        }
-
-        return $base . '/api/codex/usage';
+        return CodexProtocol::usageEndpoint($this->usageBaseUrl());
     }
 
     private function usageBaseUrl(): string
@@ -113,7 +103,7 @@ final class CodexUsageClient implements UsageClient
             return $candidate;
         }
 
-        return 'https://chatgpt.com/backend-api';
+        return CodexProtocol::defaultBackendBaseUrl();
     }
 
     private function errorSummary(ResponseInterface $response, string $body): string

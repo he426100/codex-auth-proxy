@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CodexAuthProxy\Console;
 
+use CodexAuthProxy\AppMeta;
 use CodexAuthProxy\Config\AppConfigLoader;
 use CodexAuthProxy\Console\Command\ConfigCommand;
 use CodexAuthProxy\Console\Command\AccountsCommand;
@@ -36,7 +37,7 @@ final class Application extends SymfonyApplication
         ?LoggerConfigLoader $loggerConfigLoader = null,
         ?UsageClient $usageClient = null,
     ) {
-        parent::__construct('codex-auth-proxy', '0.1.0');
+        parent::__construct(AppMeta::NAME, AppMeta::VERSION);
 
         $configLoader ??= new AppConfigLoader($home);
         $loggerConfigLoader ??= new LoggerConfigLoader();

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use CodexAuthProxy\Codex\CodexRuntimeProfile;
 use CodexAuthProxy\Observability\RequestTraceLogger;
 use CodexAuthProxy\Logging\LoggerFactory;
 use CodexAuthProxy\Proxy\CodexProxyServer;
@@ -35,6 +36,8 @@ if ($proxyPort <= 0 || $upstreamPort <= 0 || $accountsDir === '' || $home === ''
     stateFile: $home . '/state.json',
     defaultCooldownSeconds: 18000,
     upstreamBase: "http://127.0.0.1:{$upstreamPort}",
+    runtimeProfile: new CodexRuntimeProfile('codex-test-agent', 'beta-test', 'codex-test-originator', ''),
+    usageBaseUrl: "http://127.0.0.1:{$upstreamPort}",
     logger: new NullLogger(),
     requestTraceLogger: new RequestTraceLogger(LoggerFactory::createTrace($home . '/logs/trace.jsonl')),
     traceTimings: $traceTimings,

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace CodexAuthProxy\Config;
 
+use CodexAuthProxy\Codex\CodexProtocol;
+use CodexAuthProxy\Codex\CodexRuntimeProfile;
 use Symfony\Component\Config\Definition\Builder\TreeBuilder;
 use Symfony\Component\Config\Definition\ConfigurationInterface;
 
@@ -24,11 +26,12 @@ final class AppConfiguration implements ConfigurationInterface
                 ->scalarNode('callback_host')->defaultValue('localhost')->cannotBeEmpty()->end()
                 ->integerNode('callback_port')->min(1)->max(65535)->defaultValue(1455)->end()
                 ->integerNode('callback_timeout_seconds')->min(1)->defaultValue(300)->end()
-                ->scalarNode('codex_user_agent')->defaultValue('codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0')->end()
-                ->scalarNode('codex_beta_features')->defaultValue('multi_agent')->end()
-                ->scalarNode('codex_originator')->defaultValue('codex-tui')->cannotBeEmpty()->end()
-                ->scalarNode('codex_residency')->defaultValue('')->end()
-                ->scalarNode('usage_base_url')->defaultValue('https://chatgpt.com/backend-api')->cannotBeEmpty()->end()
+                ->scalarNode('codex_user_agent')->defaultValue(CodexRuntimeProfile::defaultUserAgent())->end()
+                ->scalarNode('codex_beta_features')->defaultValue(CodexRuntimeProfile::defaultBetaFeatures())->end()
+                ->scalarNode('codex_originator')->defaultValue(CodexRuntimeProfile::defaultOriginator())->cannotBeEmpty()->end()
+                ->scalarNode('codex_residency')->defaultValue(CodexRuntimeProfile::defaultResidency())->end()
+                ->scalarNode('codex_upstream_base_url')->defaultValue(CodexProtocol::defaultUpstreamBaseUrl())->cannotBeEmpty()->end()
+                ->scalarNode('usage_base_url')->defaultValue(CodexProtocol::defaultBackendBaseUrl())->cannotBeEmpty()->end()
                 ->integerNode('usage_refresh_interval_seconds')->min(0)->defaultValue(600)->end()
                 ->booleanNode('trace_mutations')->defaultTrue()->end()
                 ->booleanNode('trace_timings')->defaultFalse()->end()

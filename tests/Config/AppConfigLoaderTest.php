@@ -30,10 +30,11 @@ final class AppConfigLoaderTest extends TestCase
             self::assertSame('localhost', $config->callbackHost);
             self::assertSame(1455, $config->callbackPort);
             self::assertSame(300, $config->callbackTimeoutSeconds);
-            self::assertSame('codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0', $config->codexUserAgent);
-            self::assertSame('multi_agent', $config->codexBetaFeatures);
-            self::assertSame('codex-tui', $config->codexOriginator);
+            self::assertSame('codex-auth-proxy/0.1.0', $config->codexUserAgent);
+            self::assertSame('', $config->codexBetaFeatures);
+            self::assertSame('codex-auth-proxy', $config->codexOriginator);
             self::assertSame('', $config->codexResidency);
+            self::assertSame('https://chatgpt.com/backend-api/codex', $config->codexUpstreamBaseUrl);
             self::assertSame('https://chatgpt.com/backend-api', $config->usageBaseUrl);
             self::assertSame(600, $config->usageRefreshIntervalSeconds);
             self::assertTrue($config->traceMutations);
@@ -63,6 +64,7 @@ final class AppConfigLoaderTest extends TestCase
             $this->setEnv('CODEX_AUTH_PROXY_TRACE_TIMINGS', 'true');
             $this->setEnv('CODEX_AUTH_PROXY_CODEX_ORIGINATOR', 'codex-originator-env');
             $this->setEnv('CODEX_AUTH_PROXY_CODEX_RESIDENCY', 'global');
+            $this->setEnv('CODEX_AUTH_PROXY_CODEX_UPSTREAM_BASE_URL', 'https://proxy.example.test/codex');
             $this->setEnv('CODEX_AUTH_PROXY_USAGE_BASE_URL', 'https://usage.example.test');
             $this->setEnv('CODEX_AUTH_PROXY_USAGE_REFRESH_INTERVAL_SECONDS', '120');
             $this->setEnv('CODEX_AUTH_PROXY_HTTP_PROXY', 'http://auth-http:8888');
@@ -79,6 +81,7 @@ final class AppConfigLoaderTest extends TestCase
             self::assertTrue($config->traceTimings);
             self::assertSame('codex-originator-env', $config->codexOriginator);
             self::assertSame('global', $config->codexResidency);
+            self::assertSame('https://proxy.example.test/codex', $config->codexUpstreamBaseUrl);
             self::assertSame('https://usage.example.test', $config->usageBaseUrl);
             self::assertSame(120, $config->usageRefreshIntervalSeconds);
             self::assertSame('http://auth-http:8888', $config->httpProxy);
@@ -156,6 +159,7 @@ return [
     'codex_beta_features' => 'multi_agent',
     'codex_originator' => 'codex-originator-test',
     'codex_residency' => '',
+    'codex_upstream_base_url' => 'https://chatgpt.com/backend-api/codex',
     'usage_base_url' => 'https://chatgpt.com/backend-api',
     'usage_refresh_interval_seconds' => 600,
     'http_proxy' => env('CAP_TEST_HTTP_PROXY'),

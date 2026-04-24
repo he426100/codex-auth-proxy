@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CodexAuthProxy\Console\Command;
 
+use CodexAuthProxy\Codex\CodexRuntimeProfile;
 use CodexAuthProxy\Config\AppConfigLoader;
 use CodexAuthProxy\Network\OutboundProxyConfig;
 use CodexAuthProxy\Observability\RequestTraceLogger;
@@ -38,6 +39,7 @@ final class ServeCommand extends ProxyCommand
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $config = $this->appConfig($input);
+        $runtimeProfile = CodexRuntimeProfile::fromAppConfig($config);
         $outboundProxyConfig = OutboundProxyConfig::fromAppConfig($config);
         $output->writeln("Starting Codex auth proxy on http://{$config->host}:{$config->port}");
         $this->logger->info('Starting Codex auth proxy', ['host' => $config->host, 'port' => $config->port]);
@@ -48,13 +50,11 @@ final class ServeCommand extends ProxyCommand
             accountsDir: $config->accountsDir,
             stateFile: $config->stateFile,
             defaultCooldownSeconds: $config->cooldownSeconds,
+            upstreamBase: $config->codexUpstreamBaseUrl,
+            runtimeProfile: $runtimeProfile,
+            usageBaseUrl: $config->usageBaseUrl,
             logger: $this->logger,
             outboundProxyConfig: $outboundProxyConfig,
-            codexUserAgent: $config->codexUserAgent,
-            codexBetaFeatures: $config->codexBetaFeatures,
-            codexOriginator: $config->codexOriginator,
-            codexResidency: $config->codexResidency,
-            usageBaseUrl: $config->usageBaseUrl,
             requestTraceLogger: $this->requestTraceLogger,
             traceMutations: $config->traceMutations,
             traceTimings: $config->traceTimings,

@@ -20,6 +20,7 @@ final class AppConfig
         public readonly string $codexBetaFeatures,
         public readonly string $codexOriginator,
         public readonly string $codexResidency,
+        public readonly string $codexUpstreamBaseUrl,
         public readonly string $usageBaseUrl,
         public readonly int $usageRefreshIntervalSeconds,
         public readonly bool $traceMutations,

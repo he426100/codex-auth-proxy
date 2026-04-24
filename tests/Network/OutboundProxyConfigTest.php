@@ -142,6 +142,7 @@ final class OutboundProxyConfigTest extends TestCase
             codexBetaFeatures: 'multi_agent',
             codexOriginator: 'codex-tui',
             codexResidency: '',
+            codexUpstreamBaseUrl: 'https://chatgpt.com/backend-api/codex',
             usageBaseUrl: 'https://chatgpt.com/backend-api',
             usageRefreshIntervalSeconds: 600,
             traceMutations: true,

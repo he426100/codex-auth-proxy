@@ -7,6 +7,7 @@ namespace CodexAuthProxy\Proxy;
 use CodexAuthProxy\Account\AccountRepository;
 use CodexAuthProxy\Account\CodexAccount;
 use CodexAuthProxy\Auth\TokenRefresher;
+use CodexAuthProxy\Codex\CodexRuntimeProfile;
 use CodexAuthProxy\Network\OutboundProxyConfig;
 use CodexAuthProxy\Observability\RequestIdFactory;
 use CodexAuthProxy\Observability\RequestTraceLogger;
@@ -39,15 +40,12 @@ final class CodexProxyServer
         private readonly string $accountsDir,
         private readonly string $stateFile,
         private readonly int $defaultCooldownSeconds,
-        private readonly string $upstreamBase = 'https://chatgpt.com/backend-api/codex',
+        private readonly string $upstreamBase,
+        private readonly CodexRuntimeProfile $runtimeProfile,
+        private readonly string $usageBaseUrl,
         ?LoggerInterface $logger = null,
         ?TokenRefresher $tokenRefresher = null,
         private readonly ?OutboundProxyConfig $outboundProxyConfig = null,
-        private readonly string $codexUserAgent = 'codex_cli_rs/0.114.0 codex-auth-proxy/0.1.0',
-        private readonly string $codexBetaFeatures = 'multi_agent',
-        private readonly string $codexOriginator = 'codex-tui',
-        private readonly string $codexResidency = '',
-        private readonly string $usageBaseUrl = 'https://chatgpt.com/backend-api',
         private readonly ?RequestTraceLogger $requestTraceLogger = null,
         private readonly RequestIdFactory $requestIdFactory = new RequestIdFactory(),
         private readonly bool $traceMutations = true,
@@ -69,7 +67,7 @@ final class CodexProxyServer
         $scheduler = new Scheduler($accounts, StateStore::file($this->stateFile));
         $classifier = new ErrorClassifier($this->defaultCooldownSeconds);
         $extractor = new SessionKeyExtractor();
-        $headers = new UpstreamHeaderFactory($this->codexUserAgent, $this->codexBetaFeatures, $this->codexOriginator, $this->codexResidency);
+        $headers = new UpstreamHeaderFactory($this->runtimeProfile);
         $payloadNormalizer = new ResponsesPayloadNormalizer();
         $normalizer = new ResponsesWebSocketNormalizer();
         $retryTracker = new WebSocketRetryTracker();
@@ -226,10 +224,8 @@ final class CodexProxyServer
         return new AccountUsageRefresher(
             new CodexUsageClient(
                 baseUrl: $this->usageBaseUrl,
+                runtimeProfile: $this->runtimeProfile,
                 proxyEnv: $this->outboundProxyConfig?->environment() ?? [],
-                originator: $this->codexOriginator,
-                userAgent: $this->codexUserAgent,
-                residency: $this->codexResidency,
             ),
             fn (CodexAccount $account): CodexAccount => $this->freshAccount($account, $repository, $scheduler),
             $this->activeLogger,
