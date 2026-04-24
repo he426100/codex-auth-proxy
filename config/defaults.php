@@ -32,6 +32,7 @@ return [
     'codex_upstream_base_url' => env('CODEX_AUTH_PROXY_CODEX_UPSTREAM_BASE_URL', CodexProtocol::defaultUpstreamBaseUrl()),
     'usage_base_url' => env('CODEX_AUTH_PROXY_USAGE_BASE_URL', CodexProtocol::defaultBackendBaseUrl()),
     'usage_refresh_interval_seconds' => (int) env('CODEX_AUTH_PROXY_USAGE_REFRESH_INTERVAL_SECONDS', 600),
+    'active_session_window_seconds' => (int) env('CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS', 21600),
     'trace_mutations' => env('CODEX_AUTH_PROXY_TRACE_MUTATIONS', true),
     'trace_timings' => env('CODEX_AUTH_PROXY_TRACE_TIMINGS', false),
     'http_proxy' => env('CODEX_AUTH_PROXY_HTTP_PROXY'),

@@ -34,6 +34,82 @@ final class StateStoreUsageTest extends TestCase
         self::assertSame(7, $state->cursor());
     }
 
+    public function testSnapshotCanSeedIndependentMemoryStore(): void
+    {
+        $state = StateStore::memory();
+        $state->bindSession('thread-1', 'acct-alpha');
+        $state->setCooldown('acct-alpha', 1234567890, 'auth');
+
+        $copy = StateStore::fromArray($state->snapshot());
+        $copy->bindSession('thread-2', 'acct-beta');
+
+        self::assertSame('acct-alpha', $copy->sessionAccount('thread-1'));
+        self::assertSame('acct-beta', $copy->sessionAccount('thread-2'));
+        self::assertSame('acct-alpha', $state->sessionAccount('thread-1'));
+        self::assertNull($state->sessionAccount('thread-2'));
+        self::assertSame(1234567890, $copy->cooldownUntil('acct-alpha'));
+        self::assertSame('auth', $copy->cooldownReason('acct-alpha'));
+    }
+
+    public function testPersistsStructuredSessionBindingMetadata(): void
+    {
+        $dir = $this->tempDir('cap-state');
+        $path = $dir . '/state.json';
+        $state = StateStore::file($path);
+
+        $state->bindSession('thread-1', 'acct-alpha', 'hard_switch', 1234567890);
+        $reloaded = StateStore::file($path);
+
+        self::assertSame([
+            'account_id' => 'acct-alpha',
+            'selection_source' => 'hard_switch',
+            'bound_at' => 1234567890,
+            'last_seen_at' => 1234567890,
+        ], $reloaded->sessionBinding('thread-1'));
+        self::assertSame([
+            'thread-1' => [
+                'account_id' => 'acct-alpha',
+                'selection_source' => 'hard_switch',
+                'bound_at' => 1234567890,
+                'last_seen_at' => 1234567890,
+            ],
+        ], $reloaded->allSessionBindings());
+        self::assertSame(['thread-1' => 'acct-alpha'], $reloaded->allSessionAccounts());
+    }
+
+    public function testReadsLegacyStringSessionBindingAsStructuredView(): void
+    {
+        $state = StateStore::fromArray([
+            'accounts' => [],
+            'sessions' => [
+                'thread-1' => 'acct-alpha',
+            ],
+            'cursor' => 0,
+            'usage' => [],
+        ]);
+
+        self::assertSame([
+            'account_id' => 'acct-alpha',
+            'selection_source' => null,
+            'bound_at' => null,
+            'last_seen_at' => null,
+        ], $state->sessionBinding('thread-1'));
+    }
+
+    public function testTouchSessionUpdatesLastSeenWithoutChangingBindingMetadata(): void
+    {
+        $state = StateStore::memory();
+        $state->bindSession('thread-1', 'acct-alpha', 'new_session', 1234567890);
+        $state->touchSession('thread-1', 1234567999);
+
+        self::assertSame([
+            'account_id' => 'acct-alpha',
+            'selection_source' => 'new_session',
+            'bound_at' => 1234567890,
+            'last_seen_at' => 1234567999,
+        ], $state->sessionBinding('thread-1'));
+    }
+
     public function testPersistsAndReloadsCachedAccountUsage(): void
     {
         $dir = $this->tempDir('cap-state');
@@ -63,15 +139,19 @@ final class StateStoreUsageTest extends TestCase
         $path = $dir . '/state.json';
         $state = StateStore::file($path);
 
-        $state->setCooldown('acct-alpha', 1234567890, 'auth');
+        $state->setCooldown('acct-alpha', 1234567890, 'auth', 1234567000);
         $reloaded = StateStore::file($path);
         self::assertSame(1234567890, $reloaded->cooldownUntil('acct-alpha'));
         self::assertSame('auth', $reloaded->cooldownReason('acct-alpha'));
+        self::assertSame('auth', $reloaded->lastCooldownReason('acct-alpha'));
+        self::assertSame(1234567000, $reloaded->lastCooldownAt('acct-alpha'));
 
         $state->setCooldownUntil('acct-alpha', 0);
         $cleared = StateStore::file($path);
         self::assertSame(0, $cleared->cooldownUntil('acct-alpha'));
         self::assertNull($cleared->cooldownReason('acct-alpha'));
+        self::assertSame('auth', $cleared->lastCooldownReason('acct-alpha'));
+        self::assertSame(1234567000, $cleared->lastCooldownAt('acct-alpha'));
     }
 
     public function testWritesMergeExternalStateChangesFromOtherProcesses(): void

@@ -59,6 +59,7 @@ final class ServeCommand extends ProxyCommand
             traceMutations: $config->traceMutations,
             traceTimings: $config->traceTimings,
             usageRefreshIntervalSeconds: $config->usageRefreshIntervalSeconds,
+            activeSessionWindowSeconds: $config->activeSessionWindowSeconds,
         ))->start();
 
         return self::SUCCESS;

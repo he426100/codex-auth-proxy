@@ -17,6 +17,7 @@ use CodexAuthProxy\Routing\Scheduler;
 use CodexAuthProxy\Routing\StateStore;
 use CodexAuthProxy\Usage\AccountUsageRefresher;
 use CodexAuthProxy\Usage\CodexUsageClient;
+use CodexAuthProxy\Usage\UsageRefreshPolicy;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use RuntimeException;
@@ -53,6 +54,7 @@ final class CodexProxyServer
         private readonly int $websocketSessionIdleTtlSeconds = 300,
         private readonly int $websocketSessionSweepIntervalSeconds = 30,
         private readonly int $usageRefreshIntervalSeconds = 600,
+        private readonly int $activeSessionWindowSeconds = 21600,
     ) {
         $this->activeLogger = $logger ?? new NullLogger();
         $this->activeTokenRefresher = $tokenRefresher ?? new TokenRefresher(proxy: $outboundProxyConfig?->guzzleProxy() ?? []);
@@ -131,7 +133,10 @@ final class CodexProxyServer
         CodexWebSocketSessionRegistry $sessionRegistry,
     ): void {
         $sessionSweepTimerId = null;
-        $usageRefreshTimerId = null;
+        $usageRefreshLoop = [
+            'timer_id' => null,
+            'stopped' => false,
+        ];
         $server->on('open', static function (Server $server, Request $request) use ($sessionRegistry): void {
             $fd = (int) ($request->fd ?? 0);
             if ($fd > 0) {
@@ -152,9 +157,11 @@ final class CodexProxyServer
             $this->handleHttp($request, $response, $scheduler, $classifier, $repository, $extractor, $headers, $payloadNormalizer);
         });
 
-        $server->on('workerStart', function () use (&$sessionSweepTimerId, &$usageRefreshTimerId, $sessionRegistry, $repository, $scheduler): void {
+        $server->on('workerStart', function () use (&$sessionSweepTimerId, &$usageRefreshLoop, $sessionRegistry, $repository, $scheduler): void {
+            $usageRefreshLoop['stopped'] = false;
+            $usageRefreshLoop['timer_id'] = null;
             if ($this->websocketSessionIdleTtlSeconds <= 0 || $this->websocketSessionSweepIntervalSeconds <= 0) {
-                $this->startUsageRefreshTimer($repository, $scheduler, $usageRefreshTimerId);
+                $this->startUsageRefreshTimer($repository, $scheduler, $usageRefreshLoop);
                 return;
             }
 
@@ -163,17 +170,18 @@ final class CodexProxyServer
                     $client->close();
                 }
             });
-            $this->startUsageRefreshTimer($repository, $scheduler, $usageRefreshTimerId);
+            $this->startUsageRefreshTimer($repository, $scheduler, $usageRefreshLoop);
         });
 
-        $server->on($this->shutdownEvent(), function () use ($sessionRegistry, &$sessionSweepTimerId, &$usageRefreshTimerId): void {
+        $server->on($this->shutdownEvent(), function () use ($sessionRegistry, &$sessionSweepTimerId, &$usageRefreshLoop): void {
+            $usageRefreshLoop['stopped'] = true;
             if (is_int($sessionSweepTimerId)) {
                 Timer::clear($sessionSweepTimerId);
                 $sessionSweepTimerId = null;
             }
-            if (is_int($usageRefreshTimerId)) {
-                Timer::clear($usageRefreshTimerId);
-                $usageRefreshTimerId = null;
+            if (is_int($usageRefreshLoop['timer_id'] ?? null)) {
+                Timer::clear($usageRefreshLoop['timer_id']);
+                $usageRefreshLoop['timer_id'] = null;
             }
             foreach ($sessionRegistry->clearAll() as $client) {
                 $client->close();
@@ -187,36 +195,75 @@ final class CodexProxyServer
         return 'shutdown';
     }
 
-    private function startUsageRefreshTimer(AccountRepository $repository, Scheduler $scheduler, ?int &$timerId): void
+    /**
+     * @param array{timer_id:?int,stopped:bool} $loop
+     */
+    private function startUsageRefreshTimer(AccountRepository $repository, Scheduler $scheduler, array &$loop): void
     {
         if ($this->usageRefreshIntervalSeconds <= 0) {
             return;
         }
 
+        $state = StateStore::file($this->stateFile);
+        $policy = new UsageRefreshPolicy($this->usageRefreshIntervalSeconds);
         $running = false;
-        $refresh = function () use ($repository, $scheduler, &$running): void {
-            if ($running) {
+        $consecutiveFailures = 0;
+        $scheduleNext = null;
+        $runRefresh = static function (): void {
+        };
+        $scheduleNext = function (int $delaySeconds) use (&$loop, &$runRefresh): void {
+            if ($loop['stopped']) {
                 return;
             }
+
+            $loop['timer_id'] = Timer::after(max(1, $delaySeconds) * 1000, function () use (&$loop, &$runRefresh): void {
+                $loop['timer_id'] = null;
+                call_user_func($runRefresh);
+            });
+        };
+        $runRefresh = function () use (&$loop, &$scheduleNext, $repository, $scheduler, $state, $policy, &$running, &$consecutiveFailures): void {
+            if ($loop['stopped'] || $running) {
+                return;
+            }
+
             $running = true;
-            Coroutine::create(function () use ($repository, $scheduler, &$running): void {
+            Coroutine::create(function () use (&$scheduleNext, $repository, $scheduler, $state, $policy, &$running, &$consecutiveFailures): void {
+                $nextDelay = $policy->delayAfterSuccessSeconds();
                 try {
                     $summary = $this->accountUsageRefresher($repository, $scheduler)
-                        ->refreshAll($repository, StateStore::file($this->stateFile), time());
+                        ->refreshAll($repository, $state, time());
                     $this->syncSchedulerAccounts($repository, $scheduler);
-                    $this->activeLogger->info('Refreshed Codex account usage snapshots', $summary);
+                    $successful = $summary['success'] > 0 || $summary['failure'] === 0;
+                    if ($successful) {
+                        $consecutiveFailures = 0;
+                        $nextDelay = $policy->delayAfterSuccessSeconds();
+                        $this->activeLogger->info('Refreshed Codex account usage snapshots', $summary + [
+                            'next_refresh_seconds' => $nextDelay,
+                        ]);
+                    } else {
+                        $consecutiveFailures++;
+                        $nextDelay = $policy->delayAfterFailureSeconds($consecutiveFailures);
+                        $this->activeLogger->warning('Codex account usage refresh yielded no successful snapshots', $summary + [
+                            'consecutive_failures' => $consecutiveFailures,
+                            'next_refresh_seconds' => $nextDelay,
+                        ]);
+                    }
                 } catch (Throwable $throwable) {
+                    $consecutiveFailures++;
+                    $nextDelay = $policy->delayAfterFailureSeconds($consecutiveFailures);
                     $this->activeLogger->warning('Failed to refresh Codex account usage snapshots', [
                         'error' => $throwable->getMessage(),
+                        'consecutive_failures' => $consecutiveFailures,
+                        'next_refresh_seconds' => $nextDelay,
                     ]);
                 } finally {
                     $running = false;
+                    $scheduleNext($nextDelay);
                 }
             });
         };
 
-        $refresh();
-        $timerId = Timer::tick($this->usageRefreshIntervalSeconds * 1000, $refresh);
+        $runRefresh();
     }
 
     private function accountUsageRefresher(AccountRepository $repository, Scheduler $scheduler): AccountUsageRefresher
@@ -265,9 +312,11 @@ final class CodexProxyServer
         try {
             $accountPrepareStartedAt = microtime(true);
             $selectionTimings = [];
-            $account = $this->freshAccount($this->accountForSessionWithRecovery($sessionKey, $scheduler, $repository, $selectionTimings), $repository, $scheduler);
+            $selection = [];
+            $account = $this->freshAccount($this->accountForSessionWithRecovery($sessionKey, $scheduler, $repository, $selectionTimings, $selection), $repository, $scheduler);
             $timings['scheduler_reload'] += (float) ($selectionTimings['scheduler_reload'] ?? 0.0);
             $timings['account_prepare'] += $this->elapsedMs($accountPrepareStartedAt);
+            $this->traceAccountSelection($requestId, 'http', $sessionKey, $selection);
             $authRefreshAttempts = [];
             while (true) {
                 $result = $this->forward($request, $response, $account, $body, $headers, false);
@@ -316,13 +365,15 @@ final class CodexProxyServer
                 $this->traceUpstreamError($requestId, 'http', 'hard_switch', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
                 $accountPrepareStartedAt = microtime(true);
                 $selectionTimings = [];
+                $selection = [];
                 $account = $this->freshAccount(
-                    $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository, $selectionTimings),
+                    $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository, $selectionTimings, $selection),
                     $repository,
                     $scheduler,
                 );
                 $timings['scheduler_reload'] += (float) ($selectionTimings['scheduler_reload'] ?? 0.0);
                 $timings['account_prepare'] += $this->elapsedMs($accountPrepareStartedAt);
+                $this->traceAccountSelection($requestId, 'http', $sessionKey, $selection);
             }
         } catch (RuntimeException $exception) {
             $this->activeLogger->warning('Codex proxy request unavailable', [
@@ -369,6 +420,7 @@ final class CodexProxyServer
         $sessionKey = $extractor->extract($request->header ?? [], $rawPayload);
         $executionSessionKey = $extractor->extractExecutionSession($request->header ?? [], $rawPayload);
         $session = $sessionRegistry->bindSession($fd, $executionSessionKey);
+        $this->touchSessionBinding($sessionKey);
         $sessionRegistry->abortActiveRequestForNewFd($fd)?->close();
         $sessionId = $session->sessionId();
         $client = $sessionRegistry->client($fd);
@@ -394,9 +446,11 @@ final class CodexProxyServer
             try {
                 $accountPrepareStartedAt = microtime(true);
                 $selectionTimings = [];
-                $account = $this->freshAccount($this->accountForSessionWithRecovery($sessionKey, $scheduler, $repository, $selectionTimings), $repository, $scheduler);
+                $selection = [];
+                $account = $this->freshAccount($this->accountForSessionWithRecovery($sessionKey, $scheduler, $repository, $selectionTimings, $selection), $repository, $scheduler);
                 $timings['scheduler_reload'] += (float) ($selectionTimings['scheduler_reload'] ?? 0.0);
                 $timings['account_prepare'] += $this->elapsedMs($accountPrepareStartedAt);
+                $this->traceAccountSelection($requestId, 'websocket', $sessionKey, $selection);
                 $upgradeStartedAt = microtime(true);
                 [$client, $account] = $this->openUpstreamWebSocketWithRecovery(
                     $request,
@@ -657,11 +711,13 @@ final class CodexProxyServer
 
             $cooldownSeconds = max(1, $classification->cooldownUntil() - time());
             $this->traceUpstreamError($requestId, 'websocket', 'http_fallback_hard_switch', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
+            $selection = [];
             $account = $this->freshAccount(
-                $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository),
+                $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository, selection: $selection),
                 $repository,
                 $scheduler,
             );
+            $this->traceAccountSelection($requestId, 'websocket', $sessionKey, $selection);
         }
     }
 
@@ -948,11 +1004,13 @@ final class CodexProxyServer
                     $failure['body'] ?? $throwable->getMessage(),
                     $classification->type(),
                 );
+                $selection = [];
                 $account = $this->freshAccount(
-                    $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository),
+                    $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository, selection: $selection),
                     $repository,
                     $scheduler,
                 );
+                $this->traceAccountSelection($requestId, 'websocket', $sessionKey, $selection);
             }
         }
     }
@@ -1034,11 +1092,13 @@ final class CodexProxyServer
                         if ($lastPayload !== null && $retryTracker->claimRetry($fd, $lastPayload['payload'], $account->accountId(), $forwardedData)) {
                             $replacement = null;
                             try {
+                                $selection = [];
                                 $replacement = $this->freshAccount(
-                                    $this->switchAfterHardFailureWithRecovery($lastPayload['sessionKey'], $cooldownSeconds, $classification->type(), $scheduler, $repository),
+                                    $this->switchAfterHardFailureWithRecovery($lastPayload['sessionKey'], $cooldownSeconds, $classification->type(), $scheduler, $repository, selection: $selection),
                                     $repository,
                                     $scheduler,
                                 );
+                                $this->traceAccountSelection($requestId, 'websocket', $lastPayload['sessionKey'], $selection);
                                 $authRefreshAttempts = [];
                                 [$replacementClient, $replacement] = $this->openUpstreamWebSocketWithRecovery(
                                     $request,
@@ -1084,7 +1144,10 @@ final class CodexProxyServer
                             }
                         } else {
                             try {
-                                $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository);
+                                $selection = [];
+                                $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository, selection: $selection);
+                                $requestId = $this->requestIdFactory->fromHeaders($request->header ?? []);
+                                $this->traceAccountSelection($requestId, 'websocket', $sessionKey, $selection);
                             } catch (Throwable $throwable) {
                                 $this->activeLogger->warning('Failed to switch Codex account after WebSocket stream error', ['error' => $throwable->getMessage()]);
                             }
@@ -1382,18 +1445,24 @@ final class CodexProxyServer
     /**
      * @param array<string,float> $timings
      */
-    private function accountForSessionWithRecovery(SessionKey $sessionKey, Scheduler $scheduler, AccountRepository $repository, array &$timings = []): CodexAccount
+    private function accountForSessionWithRecovery(
+        SessionKey $sessionKey,
+        Scheduler $scheduler,
+        AccountRepository $repository,
+        array &$timings = [],
+        array &$selection = [],
+    ): CodexAccount
     {
         $timings['scheduler_reload'] = ($timings['scheduler_reload'] ?? 0.0) + $this->syncSchedulerAccounts($repository, $scheduler);
 
         try {
-            return $scheduler->accountForSession($sessionKey->primary, $sessionKey->fallback);
+            return $scheduler->accountForSession($sessionKey->primary, $sessionKey->fallback, $selection);
         } catch (RuntimeException $exception) {
             if (!$this->isNoAvailableAccount($exception) || !$this->recoverAuthCooldownAccounts($repository, $scheduler)) {
                 throw $exception;
             }
 
-            return $scheduler->accountForSession($sessionKey->primary, $sessionKey->fallback);
+            return $scheduler->accountForSession($sessionKey->primary, $sessionKey->fallback, $selection);
         }
     }
 
@@ -1404,17 +1473,18 @@ final class CodexProxyServer
         Scheduler $scheduler,
         AccountRepository $repository,
         array &$timings = [],
+        array &$selection = [],
     ): CodexAccount {
         $timings['scheduler_reload'] = ($timings['scheduler_reload'] ?? 0.0) + $this->syncSchedulerAccounts($repository, $scheduler);
 
         try {
-            return $scheduler->switchAfterHardFailure($sessionKey->primary, $cooldownSeconds, $cooldownReason);
+            return $scheduler->switchAfterHardFailure($sessionKey->primary, $cooldownSeconds, $cooldownReason, $selection);
         } catch (RuntimeException $exception) {
             if (!$this->isNoAvailableAccount($exception) || !$this->recoverAuthCooldownAccounts($repository, $scheduler)) {
                 throw $exception;
             }
 
-            return $scheduler->switchAfterHardFailure($sessionKey->primary, $cooldownSeconds, $cooldownReason);
+            return $scheduler->switchAfterHardFailure($sessionKey->primary, $cooldownSeconds, $cooldownReason, $selection);
         }
     }
 
@@ -1510,9 +1580,52 @@ final class CodexProxyServer
                 'status' => $status,
                 'classification' => $classification,
                 'message' => $message,
-            ]);
+            ] + $this->sessionTraceContext($sessionKey));
         } catch (Throwable $throwable) {
             $this->activeLogger->warning('Failed to write request trace', [
+                'request_id' => $requestId,
+                'error' => $throwable->getMessage(),
+            ]);
+        }
+    }
+
+    /** @param array<string,mixed> $selection */
+    private function traceAccountSelection(string $requestId, string $transport, SessionKey $sessionKey, array $selection): void
+    {
+        if ($this->requestTraceLogger === null || $selection === []) {
+            return;
+        }
+
+        $source = $selection['source'] ?? null;
+        if (!is_string($source) || $source === '' || $source === 'bound_session') {
+            return;
+        }
+
+        $event = [
+            'request_id' => $requestId,
+            'transport' => $transport,
+            'phase' => 'account_selected',
+            'session' => $sessionKey->primary,
+            'selection_source' => $source,
+        ];
+
+        if (isset($selection['selected_account_name']) && is_string($selection['selected_account_name']) && $selection['selected_account_name'] !== '') {
+            $event['account'] = $selection['selected_account_name'];
+        }
+        foreach (['selected_account_id', 'previous_account_id', 'excluded_account_id', 'cooldown_reason', 'fallback_session_key'] as $key) {
+            if (isset($selection[$key]) && is_string($selection[$key]) && $selection[$key] !== '') {
+                $event[$key] = $selection[$key];
+            }
+        }
+        if (isset($selection['candidates']) && is_array($selection['candidates']) && $selection['candidates'] !== []) {
+            $event['candidates'] = $selection['candidates'];
+        }
+        $event += $this->sessionTraceContext($sessionKey);
+
+        try {
+            $this->requestTraceLogger->event($event);
+        } catch (Throwable $throwable) {
+            $this->activeLogger->warning('Failed to write account selection trace', [
                 'request_id' => $requestId,
                 'error' => $throwable->getMessage(),
             ]);
@@ -1556,6 +1669,7 @@ final class CodexProxyServer
         if ($message !== null && $message !== '') {
             $event['message'] = $message;
         }
+        $event += $this->sessionTraceContext($sessionKey);
 
         try {
             $this->requestTraceLogger->event($event);
@@ -1564,6 +1678,68 @@ final class CodexProxyServer
                 'request_id' => $requestId,
                 'error' => $throwable->getMessage(),
             ]);
+        }
+    }
+
+    /** @return array<string,mixed> */
+    private function sessionTraceContext(SessionKey $sessionKey): array
+    {
+        $binding = StateStore::file($this->stateFile)->sessionBinding($sessionKey->primary);
+        if (!is_array($binding)) {
+            return [];
+        }
+
+        $boundAt = $binding['bound_at'] ?? null;
+        $lastSeenAt = $binding['last_seen_at'] ?? $boundAt;
+        $activity = $this->sessionActivityLabel($lastSeenAt);
+        $context = [
+            'bound_account_id' => $binding['account_id'],
+            'bound_selection_source' => $binding['selection_source'],
+            'session_activity' => $activity['label'],
+        ];
+        if (is_int($boundAt) && $boundAt > 0) {
+            $context['bound_at'] = $boundAt;
+        }
+        if (is_int($lastSeenAt) && $lastSeenAt > 0) {
+            $context['last_seen_at'] = $lastSeenAt;
+        }
+        if (is_bool($activity['is_active'])) {
+            $context['session_is_active'] = $activity['is_active'];
+        }
+
+        return $context;
+    }
+
+    /** @return array{label:string,is_active:?bool} */
+    private function sessionActivityLabel(?int $lastSeenAt): array
+    {
+        if ($lastSeenAt === null || $lastSeenAt <= 0) {
+            return [
+                'label' => 'unknown',
+                'is_active' => null,
+            ];
+        }
+        if ($this->activeSessionWindowSeconds <= 0) {
+            return [
+                'label' => 'active',
+                'is_active' => true,
+            ];
+        }
+
+        $active = $lastSeenAt >= (time() - $this->activeSessionWindowSeconds);
+
+        return [
+            'label' => $active ? 'active' : 'stale',
+            'is_active' => $active,
+        ];
+    }
+
+    private function touchSessionBinding(SessionKey $sessionKey, ?int $seenAt = null): void
+    {
+        $state = StateStore::file($this->stateFile);
+        $state->touchSession($sessionKey->primary, $seenAt);
+        if ($sessionKey->fallback !== null && $sessionKey->fallback !== '' && $sessionKey->fallback !== $sessionKey->primary) {
+            $state->touchSession($sessionKey->fallback, $seenAt);
         }
     }
 

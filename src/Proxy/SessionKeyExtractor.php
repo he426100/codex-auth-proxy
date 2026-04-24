@@ -11,8 +11,10 @@ final class SessionKeyExtractor
         return $this->extractWithPriority(
             $headers,
             $body,
-            ['x-codex-turn-state', 'session_id', 'conversation_id', 'x-session-id', 'x-codex-session-id', 'x-codex-thread-id', 'openai-conversation-id', 'idempotency-key'],
-            ['conversation_id', 'thread_id', 'session_id', 'previous_response_id', 'prompt_cache_key'],
+            ['session_id', 'conversation_id', 'x-session-id', 'x-codex-session-id', 'x-codex-thread-id', 'openai-conversation-id'],
+            ['conversation_id', 'thread_id', 'session_id', 'previous_response_id'],
+            ['x-codex-turn-state', 'idempotency-key'],
+            ['prompt_cache_key'],
         );
     }
 
@@ -21,50 +23,60 @@ final class SessionKeyExtractor
         return $this->extractWithPriority(
             $headers,
             $body,
-            ['session_id', 'conversation_id', 'x-session-id', 'x-codex-session-id', 'x-codex-thread-id', 'openai-conversation-id', 'idempotency-key', 'x-codex-turn-state'],
-            ['conversation_id', 'thread_id', 'session_id', 'previous_response_id', 'prompt_cache_key'],
+            ['session_id', 'conversation_id', 'x-session-id', 'x-codex-session-id', 'x-codex-thread-id', 'openai-conversation-id'],
+            ['conversation_id', 'thread_id', 'session_id', 'previous_response_id'],
+            ['x-codex-turn-state', 'idempotency-key'],
+            ['prompt_cache_key'],
         );
     }
 
     /**
-     * @param list<string> $headerKeys
-     * @param list<string> $bodyKeys
+     * @param list<string> $stableHeaderKeys
+     * @param list<string> $stableBodyKeys
+     * @param list<string> $fallbackHeaderKeys
+     * @param list<string> $fallbackBodyKeys
      */
-    private function extractWithPriority(array $headers, string $body, array $headerKeys, array $bodyKeys): SessionKey
+    private function extractWithPriority(
+        array $headers,
+        string $body,
+        array $stableHeaderKeys,
+        array $stableBodyKeys,
+        array $fallbackHeaderKeys,
+        array $fallbackBodyKeys,
+    ): SessionKey
     {
         $headers = $this->normalizeHeaders($headers);
-        foreach ($headerKeys as $header) {
-            $value = $headers[$header] ?? null;
-            if (is_string($value) && trim($value) !== '') {
-                return new SessionKey($header . ':' . trim($value));
-            }
+
+        $stableHeader = $this->firstHeaderAnchor($headers, $stableHeaderKeys);
+        if ($stableHeader !== null) {
+            return $stableHeader;
         }
 
         $decoded = json_decode($body, true);
+        if (is_array($decoded)) {
+            $stableBody = $this->firstBodyAnchor($decoded, $stableBodyKeys);
+            if ($stableBody !== null) {
+                return $stableBody;
+            }
+        }
+
+        $fallbackHeader = $this->firstHeaderAnchor($headers, $fallbackHeaderKeys);
+        if ($fallbackHeader !== null) {
+            return $fallbackHeader;
+        }
+
         if (!is_array($decoded)) {
             return new SessionKey('global');
         }
 
-        foreach ($bodyKeys as $key) {
-            $value = $decoded[$key] ?? null;
-            if (is_string($value) && trim($value) !== '') {
-                return new SessionKey($key . ':' . trim($value));
-            }
+        $fallbackBody = $this->firstBodyAnchor($decoded, $fallbackBodyKeys);
+        if ($fallbackBody !== null) {
+            return $fallbackBody;
         }
 
-        $metadataUserId = $decoded['metadata']['user_id'] ?? null;
-        if (is_string($metadataUserId) && trim($metadataUserId) !== '') {
-            $metadataUserId = trim($metadataUserId);
-            if (preg_match('/_session_([a-f0-9-]+)$/', $metadataUserId, $matches) === 1) {
-                return new SessionKey('metadata.session_id:' . $matches[1]);
-            }
-
-            $nested = json_decode($metadataUserId, true);
-            if (is_array($nested) && is_string($nested['session_id'] ?? null) && trim($nested['session_id']) !== '') {
-                return new SessionKey('metadata.session_id:' . trim($nested['session_id']));
-            }
-
-            return new SessionKey('metadata.user_id:' . $metadataUserId);
+        $metadataAnchor = $this->metadataAnchor($decoded);
+        if ($metadataAnchor !== null) {
+            return $metadataAnchor;
         }
 
         [$primary, $fallback] = $this->messageHash($decoded);
@@ -73,6 +85,59 @@ final class SessionKeyExtractor
         }
 
         return new SessionKey('global');
+    }
+
+    /**
+     * @param array<string,string> $headers
+     * @param list<string> $keys
+     */
+    private function firstHeaderAnchor(array $headers, array $keys): ?SessionKey
+    {
+        foreach ($keys as $key) {
+            $value = $headers[$key] ?? null;
+            if (is_string($value) && trim($value) !== '') {
+                return new SessionKey($key . ':' . trim($value));
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string,mixed> $payload
+     * @param list<string> $keys
+     */
+    private function firstBodyAnchor(array $payload, array $keys): ?SessionKey
+    {
+        foreach ($keys as $key) {
+            $value = $payload[$key] ?? null;
+            if (is_string($value) && trim($value) !== '') {
+                return new SessionKey($key . ':' . trim($value));
+            }
+        }
+
+        return null;
+    }
+
+    /** @param array<string,mixed> $payload */
+    private function metadataAnchor(array $payload): ?SessionKey
+    {
+        $metadataUserId = $payload['metadata']['user_id'] ?? null;
+        if (!is_string($metadataUserId) || trim($metadataUserId) === '') {
+            return null;
+        }
+
+        $metadataUserId = trim($metadataUserId);
+        if (preg_match('/_session_([a-f0-9-]+)$/', $metadataUserId, $matches) === 1) {
+            return new SessionKey('metadata.session_id:' . $matches[1]);
+        }
+
+        $nested = json_decode($metadataUserId, true);
+        if (is_array($nested) && is_string($nested['session_id'] ?? null) && trim($nested['session_id']) !== '') {
+            return new SessionKey('metadata.session_id:' . trim($nested['session_id']));
+        }
+
+        return new SessionKey('metadata.user_id:' . $metadataUserId);
     }
 
     /** @param array<string,mixed> $headers */

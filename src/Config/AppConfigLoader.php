@@ -66,6 +66,9 @@ final class AppConfigLoader
                 ?? $this->stringValue($defaults['usage_base_url'] ?? null),
             'usage_refresh_interval_seconds' => $this->intValue($overrides['usage_refresh_interval_seconds'] ?? null)
                 ?? $this->intValue($defaults['usage_refresh_interval_seconds'] ?? null),
+            'active_session_window_seconds' => $this->intValue($overrides['active_session_window_seconds'] ?? null)
+                ?? $this->intValue($defaults['active_session_window_seconds'] ?? null)
+                ?? 21600,
             'trace_mutations' => $this->boolValue($overrides['trace_mutations'] ?? null)
                 ?? $this->boolValue($defaults['trace_mutations'] ?? null)
                 ?? true,
@@ -98,6 +101,7 @@ final class AppConfigLoader
          *   codex_upstream_base_url:string,
          *   usage_base_url:string,
          *   usage_refresh_interval_seconds:int,
+         *   active_session_window_seconds:int,
          *   trace_mutations:bool,
          *   trace_timings:bool,
          *   http_proxy:?string,
@@ -129,6 +133,7 @@ final class AppConfigLoader
             $processed['http_proxy'],
             $processed['https_proxy'],
             $processed['no_proxy'],
+            $processed['active_session_window_seconds'],
         );
     }
 

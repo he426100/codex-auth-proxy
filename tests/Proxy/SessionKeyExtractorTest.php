@@ -66,6 +66,29 @@ final class SessionKeyExtractorTest extends TestCase
         self::assertSame('conversation_id:conv-1', $native->primary);
     }
 
+    public function testExtractPrefersStableSessionHeaderOverTurnState(): void
+    {
+        $extractor = new SessionKeyExtractor();
+
+        $key = $extractor->extract([
+            'session_id' => 'native-session-1',
+            'x-codex-turn-state' => 'turn-1',
+        ], '{}');
+
+        self::assertSame('session_id:native-session-1', $key->primary);
+    }
+
+    public function testExtractPrefersConversationIdInBodyOverTurnStateHeader(): void
+    {
+        $extractor = new SessionKeyExtractor();
+
+        $key = $extractor->extract([
+            'x-codex-turn-state' => 'turn-1',
+        ], '{"conversation_id":"conv-1","prompt_cache_key":"cache-1","input":[]}');
+
+        self::assertSame('conversation_id:conv-1', $key->primary);
+    }
+
     public function testExtractExecutionSessionPrefersStableSessionHeaderOverTurnState(): void
     {
         $extractor = new SessionKeyExtractor();

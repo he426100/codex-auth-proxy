@@ -28,6 +28,7 @@ final class AppConfig
         public readonly ?string $httpProxy,
         public readonly ?string $httpsProxy,
         public readonly string $noProxy,
+        public readonly int $activeSessionWindowSeconds = 21600,
     ) {
     }
 }

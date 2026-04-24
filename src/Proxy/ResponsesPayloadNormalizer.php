@@ -79,6 +79,7 @@ final class ResponsesPayloadNormalizer
             $this->normalizeHttpCompatibility($decoded, $mutations);
         }
 
+        $this->normalizeSessionAnchors($decoded, $mutations);
         $this->normalizeParameters($decoded, $mutations);
         if ($mutations === []) {
             return new NormalizedPayload($payload, []);
@@ -148,6 +149,26 @@ final class ResponsesPayloadNormalizer
     }
 
     /** @param list<string> $mutations */
+    private function normalizeSessionAnchors(mixed $decoded, array &$mutations): void
+    {
+        if (!$decoded instanceof stdClass) {
+            return;
+        }
+
+        $hasNativeAnchor = $this->hasNonEmptyStringProperty($decoded, 'conversation_id')
+            || $this->hasNonEmptyStringProperty($decoded, 'thread_id')
+            || $this->hasNonEmptyStringProperty($decoded, 'session_id')
+            || $this->hasNonEmptyStringProperty($decoded, 'previous_response_id');
+
+        if (!$hasNativeAnchor || !property_exists($decoded, 'prompt_cache_key')) {
+            return;
+        }
+
+        unset($decoded->prompt_cache_key);
+        $mutations[] = 'anchor.prompt_cache_key_removed';
+    }
+
+    /** @param list<string> $mutations */
     private function normalizeBuiltinTool(mixed $tool, array &$mutations): void
     {
         if (!$tool instanceof stdClass || !isset($tool->type) || !is_string($tool->type)) {
@@ -186,5 +207,12 @@ final class ResponsesPayloadNormalizer
             $this->normalizeParameters($item, $mutations);
             $value[$key] = $item;
         }
+    }
+
+    private function hasNonEmptyStringProperty(stdClass $payload, string $property): bool
+    {
+        return property_exists($payload, $property)
+            && is_string($payload->{$property})
+            && trim($payload->{$property}) !== '';
     }
 }

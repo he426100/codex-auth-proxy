@@ -33,6 +33,7 @@ final class AppConfiguration implements ConfigurationInterface
                 ->scalarNode('codex_upstream_base_url')->defaultValue(CodexProtocol::defaultUpstreamBaseUrl())->cannotBeEmpty()->end()
                 ->scalarNode('usage_base_url')->defaultValue(CodexProtocol::defaultBackendBaseUrl())->cannotBeEmpty()->end()
                 ->integerNode('usage_refresh_interval_seconds')->min(0)->defaultValue(600)->end()
+                ->integerNode('active_session_window_seconds')->min(0)->defaultValue(21600)->end()
                 ->booleanNode('trace_mutations')->defaultTrue()->end()
                 ->booleanNode('trace_timings')->defaultFalse()->end()
                 ->scalarNode('http_proxy')->defaultNull()->end()

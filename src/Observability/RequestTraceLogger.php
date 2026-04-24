@@ -42,10 +42,35 @@ final class RequestTraceLogger
             'schema' => self::SCHEMA,
         ];
 
-        foreach (['request_id', 'transport', 'phase', 'session', 'account', 'status', 'classification'] as $key) {
+        foreach ([
+            'request_id',
+            'transport',
+            'phase',
+            'session',
+            'account',
+            'status',
+            'classification',
+            'selection_source',
+            'selected_account_id',
+            'previous_account_id',
+            'excluded_account_id',
+            'cooldown_reason',
+            'fallback_session_key',
+            'bound_account_id',
+            'bound_selection_source',
+            'session_activity',
+        ] as $key) {
             if (array_key_exists($key, $event)) {
                 $payload[$key] = is_string($event[$key]) ? $this->redact($event[$key]) : $event[$key];
             }
+        }
+        foreach (['bound_at', 'last_seen_at'] as $key) {
+            if (isset($event[$key]) && is_int($event[$key]) && $event[$key] > 0) {
+                $payload[$key] = $event[$key];
+            }
+        }
+        if (isset($event['session_is_active']) && is_bool($event['session_is_active'])) {
+            $payload['session_is_active'] = $event['session_is_active'];
         }
         if (isset($event['attempts']) && is_int($event['attempts']) && $event['attempts'] > 0) {
             $payload['attempts'] = $event['attempts'];
@@ -72,8 +97,42 @@ final class RequestTraceLogger
                 static fn (mixed $mutation): bool => is_string($mutation) && $mutation !== '',
             ));
         }
+        if (isset($event['candidates']) && is_array($event['candidates'])) {
+            $payload['candidates'] = $this->sanitizeCandidates($event['candidates']);
+        }
 
         return $payload;
+    }
+
+    /** @param array<mixed> $candidates */
+    private function sanitizeCandidates(array $candidates): array
+    {
+        $sanitized = [];
+        foreach ($candidates as $candidate) {
+            if (!is_array($candidate)) {
+                continue;
+            }
+
+            $entry = [];
+            foreach (['account_id', 'account', 'priority'] as $key) {
+                if (isset($candidate[$key]) && is_string($candidate[$key]) && $candidate[$key] !== '') {
+                    $entry[$key] = $this->redact($candidate[$key]);
+                }
+            }
+            foreach (['confirmed_available', 'low_quota'] as $key) {
+                if (isset($candidate[$key]) && is_bool($candidate[$key])) {
+                    $entry[$key] = $candidate[$key];
+                }
+            }
+            if (isset($candidate['quota_score']) && (is_int($candidate['quota_score']) || is_float($candidate['quota_score']))) {
+                $entry['quota_score'] = round((float) $candidate['quota_score'], 3);
+            }
+            if ($entry !== []) {
+                $sanitized[] = $entry;
+            }
+        }
+
+        return $sanitized;
     }
 
     private function sanitizeMessage(string $value): string

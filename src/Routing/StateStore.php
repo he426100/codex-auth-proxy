@@ -10,20 +10,33 @@ use CodexAuthProxy\Usage\CachedAccountUsage;
 final class StateStore
 {
     private ?string $stateRevision = null;
+    private string $candidateRevision = 'missing';
+    private int $memoryRevision = 0;
 
     /** @param array<string,mixed> $state */
     private function __construct(private array $state, private readonly ?string $path = null)
     {
+        if ($this->path === null) {
+            $this->stateRevision = 'memory:0';
+        }
+        $this->refreshCandidateRevision();
     }
 
     /**
-     * @return array{accounts: array<string,mixed>, sessions: array<string,mixed>, cursor: int, usage: array<string,mixed>}
+     * @return array{
+     *   accounts: array<string,mixed>,
+     *   sessions: array<string,mixed>,
+     *   session_meta: array<string,mixed>,
+     *   cursor: int,
+     *   usage: array<string,mixed>
+     * }
      */
     private static function defaultState(): array
     {
         return [
             'accounts' => [],
             'sessions' => [],
+            'session_meta' => [],
             'cursor' => 0,
             'usage' => [],
         ];
@@ -34,6 +47,12 @@ final class StateStore
         return new self(self::defaultState());
     }
 
+    /** @param array<string,mixed> $state */
+    public static function fromArray(array $state): self
+    {
+        return new self(self::normalizeState($state));
+    }
+
     public static function file(string $path): self
     {
         $store = new self(self::readState($path), $path);
@@ -42,18 +61,67 @@ final class StateStore
         return $store;
     }
 
+    /** @return array{accounts: array<string,mixed>, sessions: array<string,mixed>, session_meta: array<string,mixed>, cursor: int, usage: array<string,mixed>} */
+    public function snapshot(): array
+    {
+        $this->reload();
+
+        return self::normalizeState($this->state);
+    }
+
     public function sessionAccount(string $sessionKey): ?string
     {
         $this->reload();
-        $value = $this->state['sessions'][$sessionKey] ?? null;
+        $binding = $this->sessionBindingValue($this->state['sessions'][$sessionKey] ?? null);
 
-        return is_string($value) && $value !== '' ? $value : null;
+        return $binding['account_id'] ?? null;
     }
 
-    public function bindSession(string $sessionKey, string $accountId): void
+    public function bindSession(string $sessionKey, string $accountId, ?string $selectionSource = null, ?int $boundAt = null, ?int $lastSeenAt = null): void
     {
-        $this->update(function (array &$state) use ($sessionKey, $accountId): void {
+        $this->update(function (array &$state) use ($sessionKey, $accountId, $selectionSource, $boundAt, $lastSeenAt): void {
             $state['sessions'][$sessionKey] = $accountId;
+            if (!isset($state['session_meta']) || !is_array($state['session_meta'])) {
+                $state['session_meta'] = [];
+            }
+            $resolvedLastSeenAt = $lastSeenAt !== null && $lastSeenAt > 0
+                ? $lastSeenAt
+                : (($boundAt !== null && $boundAt > 0) ? $boundAt : null);
+
+            if (($selectionSource === null || $selectionSource === '') && ($boundAt === null || $boundAt <= 0) && $resolvedLastSeenAt === null) {
+                unset($state['session_meta'][$sessionKey]);
+                return;
+            }
+
+            $meta = [];
+            if ($selectionSource !== null && $selectionSource !== '') {
+                $meta['selection_source'] = $selectionSource;
+            }
+            if ($boundAt !== null && $boundAt > 0) {
+                $meta['bound_at'] = $boundAt;
+            }
+            if ($resolvedLastSeenAt !== null) {
+                $meta['last_seen_at'] = $resolvedLastSeenAt;
+            }
+            $state['session_meta'][$sessionKey] = $meta;
+        });
+    }
+
+    public function touchSession(string $sessionKey, ?int $seenAt = null): void
+    {
+        $this->update(function (array &$state) use ($sessionKey, $seenAt): void {
+            if (!isset($state['sessions'][$sessionKey]) || !is_string($state['sessions'][$sessionKey]) || $state['sessions'][$sessionKey] === '') {
+                return;
+            }
+            if (!isset($state['session_meta']) || !is_array($state['session_meta'])) {
+                $state['session_meta'] = [];
+            }
+
+            $meta = isset($state['session_meta'][$sessionKey]) && is_array($state['session_meta'][$sessionKey])
+                ? $state['session_meta'][$sessionKey]
+                : [];
+            $meta['last_seen_at'] = $seenAt !== null && $seenAt > 0 ? $seenAt : time();
+            $state['session_meta'][$sessionKey] = $meta;
         });
     }
 
@@ -66,11 +134,46 @@ final class StateStore
         }
 
         $sessions = [];
-        foreach ($this->state['sessions'] as $sessionKey => $accountId) {
-            if (!is_string($sessionKey) || $sessionKey === '' || !is_string($accountId) || $accountId === '') {
+        foreach ($this->allSessionBindings() as $sessionKey => $binding) {
+            if ($sessionKey === '') {
                 continue;
             }
-            $sessions[$sessionKey] = $accountId;
+            $sessions[$sessionKey] = $binding['account_id'];
+        }
+
+        return $sessions;
+    }
+
+    /** @return array{account_id:string,selection_source:?string,bound_at:?int,last_seen_at:?int}|null */
+    public function sessionBinding(string $sessionKey): ?array
+    {
+        $this->reload();
+
+        return $this->sessionBindingValue(
+            $this->state['sessions'][$sessionKey] ?? null,
+            $this->state['session_meta'][$sessionKey] ?? null,
+        );
+    }
+
+    /** @return array<string,array{account_id:string,selection_source:?string,bound_at:?int,last_seen_at:?int}> */
+    public function allSessionBindings(): array
+    {
+        $this->reload();
+        if (!isset($this->state['sessions']) || !is_array($this->state['sessions'])) {
+            return [];
+        }
+
+        $sessions = [];
+        foreach ($this->state['sessions'] as $sessionKey => $binding) {
+            if (!is_string($sessionKey) || $sessionKey === '') {
+                continue;
+            }
+
+            $normalized = $this->sessionBindingValue($binding, $this->state['session_meta'][$sessionKey] ?? null);
+            if ($normalized === null) {
+                continue;
+            }
+            $sessions[$sessionKey] = $normalized;
         }
 
         return $sessions;
@@ -92,6 +195,22 @@ final class StateStore
         return is_string($value) && $value !== '' ? $value : null;
     }
 
+    public function lastCooldownReason(string $accountId): ?string
+    {
+        $this->reload();
+        $value = $this->state['accounts'][$accountId]['last_cooldown_reason'] ?? null;
+
+        return is_string($value) && $value !== '' ? $value : null;
+    }
+
+    public function lastCooldownAt(string $accountId): ?int
+    {
+        $this->reload();
+        $value = $this->state['accounts'][$accountId]['last_cooldown_at'] ?? null;
+
+        return is_int($value) && $value > 0 ? $value : null;
+    }
+
     public function setCooldownUntil(string $accountId, int $timestamp): void
     {
         $this->update(function (array &$state) use ($accountId, $timestamp): void {
@@ -102,15 +221,17 @@ final class StateStore
         });
     }
 
-    public function setCooldown(string $accountId, int $timestamp, ?string $reason): void
+    public function setCooldown(string $accountId, int $timestamp, ?string $reason, ?int $recordedAt = null): void
     {
-        $this->update(function (array &$state) use ($accountId, $timestamp, $reason): void {
+        $this->update(function (array &$state) use ($accountId, $timestamp, $reason, $recordedAt): void {
             $state['accounts'][$accountId]['cooldown_until'] = max(0, $timestamp);
             if ($timestamp <= 0 || $reason === null || $reason === '') {
                 unset($state['accounts'][$accountId]['cooldown_reason']);
                 return;
             }
             $state['accounts'][$accountId]['cooldown_reason'] = $reason;
+            $state['accounts'][$accountId]['last_cooldown_reason'] = $reason;
+            $state['accounts'][$accountId]['last_cooldown_at'] = $recordedAt !== null && $recordedAt > 0 ? $recordedAt : time();
         });
     }
 
@@ -127,6 +248,13 @@ final class StateStore
         $this->update(function (array &$state) use ($cursor): void {
             $state['cursor'] = max(0, $cursor);
         });
+    }
+
+    public function candidateRevision(): string
+    {
+        $this->reload();
+
+        return $this->candidateRevision;
     }
 
     /**
@@ -205,7 +333,7 @@ final class StateStore
     private static function normalizeState(array $state): array
     {
         $state += self::defaultState();
-        foreach (['accounts', 'sessions', 'usage'] as $key) {
+        foreach (['accounts', 'sessions', 'session_meta', 'usage'] as $key) {
             if (!isset($state[$key]) || !is_array($state[$key])) {
                 $state[$key] = [];
             }
@@ -230,6 +358,56 @@ final class StateStore
 
         $this->state = self::readState($this->path);
         $this->stateRevision = $revision;
+        $this->refreshCandidateRevision();
+    }
+
+    /** @return array{account_id:string,selection_source:?string,bound_at:?int,last_seen_at:?int}|null */
+    private function sessionBindingValue(mixed $value, mixed $meta = null): ?array
+    {
+        $selectionSource = null;
+        $boundAt = null;
+        $lastSeenAt = null;
+        if (is_string($value) && $value !== '') {
+            $accountId = $value;
+        } elseif (is_array($value)) {
+            $accountId = $value['account_id'] ?? null;
+            if (!is_string($accountId) || $accountId === '') {
+                return null;
+            }
+            $selectionSource = $this->selectionSourceValue($value['selection_source'] ?? null);
+            $boundAt = $this->boundAtValue($value['bound_at'] ?? null);
+            $lastSeenAt = $this->lastSeenAtValue($value['last_seen_at'] ?? null);
+        } else {
+            return null;
+        }
+
+        if (is_array($meta)) {
+            $selectionSource = $this->selectionSourceValue($meta['selection_source'] ?? $selectionSource);
+            $boundAt = $this->boundAtValue($meta['bound_at'] ?? $boundAt);
+            $lastSeenAt = $this->lastSeenAtValue($meta['last_seen_at'] ?? $lastSeenAt);
+        }
+
+        return [
+            'account_id' => $accountId,
+            'selection_source' => $selectionSource,
+            'bound_at' => $boundAt,
+            'last_seen_at' => $lastSeenAt,
+        ];
+    }
+
+    private function selectionSourceValue(mixed $value): ?string
+    {
+        return is_string($value) && $value !== '' ? $value : null;
+    }
+
+    private function boundAtValue(mixed $value): ?int
+    {
+        return is_int($value) && $value > 0 ? $value : null;
+    }
+
+    private function lastSeenAtValue(mixed $value): ?int
+    {
+        return is_int($value) && $value > 0 ? $value : null;
     }
 
     /**
@@ -239,6 +417,9 @@ final class StateStore
     {
         if ($this->path === null) {
             $mutator($this->state);
+            $this->memoryRevision++;
+            $this->stateRevision = 'memory:' . $this->memoryRevision;
+            $this->refreshCandidateRevision();
             return;
         }
 
@@ -258,6 +439,7 @@ final class StateStore
             chmod($lockPath, 0600);
             $this->state = self::readState($this->path);
             $this->stateRevision = self::stateRevision($this->path);
+            $this->refreshCandidateRevision();
             $mutator($this->state);
             $this->writeState();
         } finally {
@@ -298,6 +480,20 @@ final class StateStore
         }
         chmod($this->path, 0600);
         $this->stateRevision = self::stateRevision($this->path);
+        $this->refreshCandidateRevision();
+    }
+
+    private function refreshCandidateRevision(): void
+    {
+        $candidateState = [
+            'accounts' => $this->state['accounts'] ?? [],
+            'usage' => $this->state['usage'] ?? [],
+        ];
+
+        $this->candidateRevision = hash(
+            'sha256',
+            json_encode($candidateState, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+        );
     }
 
     private static function stateRevision(string $path): string

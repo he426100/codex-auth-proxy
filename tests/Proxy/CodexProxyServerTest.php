@@ -242,6 +242,132 @@ final class CodexProxyServerTest extends TestCase
         self::assertSame([], $this->traceRecords($traceFile));
     }
 
+    public function testRecordsTraceForAccountSelection(): void
+    {
+        [$traceFile, $traceLogger] = $this->traceLogger('proxy-selection-trace');
+        $server = $this->server([
+            'requestTraceLogger' => $traceLogger,
+        ]);
+
+        $method = new ReflectionMethod(CodexProxyServer::class, 'traceAccountSelection');
+        $method->invoke(
+            $server,
+            'req-selection',
+            'http',
+            new SessionKey('session-selection'),
+            [
+                'source' => 'new_session',
+                'selected_account_id' => 'acct-beta',
+                'selected_account_name' => 'beta',
+                'candidates' => [
+                    [
+                        'account_id' => 'acct-beta',
+                        'account' => 'beta',
+                        'priority' => 'confirmed_available',
+                        'confirmed_available' => true,
+                        'low_quota' => false,
+                        'quota_score' => 90.0,
+                    ],
+                    [
+                        'account_id' => 'acct-alpha',
+                        'account' => 'alpha',
+                        'priority' => 'low_quota',
+                        'confirmed_available' => true,
+                        'low_quota' => true,
+                        'quota_score' => 20.0,
+                    ],
+                ],
+            ],
+        );
+
+        $records = $this->traceRecords($traceFile);
+        self::assertCount(1, $records);
+        self::assertSame('account_selected', $records[0]['context']['phase']);
+        self::assertSame('new_session', $records[0]['context']['selection_source']);
+        self::assertSame('beta', $records[0]['context']['account']);
+        self::assertSame('acct-beta', $records[0]['context']['selected_account_id']);
+        self::assertSame('acct-beta', $records[0]['context']['candidates'][0]['account_id']);
+        self::assertTrue($records[0]['context']['candidates'][0]['confirmed_available']);
+    }
+
+    public function testSkipsTraceForBoundSessionAccountSelection(): void
+    {
+        [$traceFile, $traceLogger] = $this->traceLogger('proxy-selection-trace-bound');
+        $server = $this->server([
+            'requestTraceLogger' => $traceLogger,
+        ]);
+
+        $method = new ReflectionMethod(CodexProxyServer::class, 'traceAccountSelection');
+        $method->invoke(
+            $server,
+            'req-selection-bound',
+            'http',
+            new SessionKey('session-selection-bound'),
+            [
+                'source' => 'bound_session',
+                'selected_account_id' => 'acct-alpha',
+                'selected_account_name' => 'alpha',
+            ],
+        );
+
+        self::assertSame([], $this->traceRecords($traceFile));
+    }
+
+    public function testRecordsSessionActivityContextForAccountSelectionTrace(): void
+    {
+        [$traceFile, $traceLogger] = $this->traceLogger('proxy-selection-trace-session-context');
+        $statePath = $this->tempDir('proxy-selection-trace-state') . '/state.json';
+        $now = time();
+        StateStore::file($statePath)->bindSession('session-selection', 'acct-beta', 'new_session', $now - 120, $now - 60);
+
+        $server = $this->server([
+            'requestTraceLogger' => $traceLogger,
+            'stateFile' => $statePath,
+        ]);
+
+        $method = new ReflectionMethod(CodexProxyServer::class, 'traceAccountSelection');
+        $method->invoke(
+            $server,
+            'req-selection-session-context',
+            'http',
+            new SessionKey('session-selection'),
+            [
+                'source' => 'new_session',
+                'selected_account_id' => 'acct-beta',
+                'selected_account_name' => 'beta',
+            ],
+        );
+
+        $records = $this->traceRecords($traceFile);
+        self::assertCount(1, $records);
+        self::assertSame($now - 120, $records[0]['context']['bound_at']);
+        self::assertSame($now - 60, $records[0]['context']['last_seen_at']);
+        self::assertSame('active', $records[0]['context']['session_activity']);
+        self::assertTrue($records[0]['context']['session_is_active']);
+        self::assertSame('new_session', $records[0]['context']['bound_selection_source']);
+        self::assertSame('acct-beta', $records[0]['context']['bound_account_id']);
+    }
+
+    public function testTouchesExistingSessionBindingWhenWebSocketSessionIsReused(): void
+    {
+        $statePath = $this->tempDir('proxy-session-touch-state') . '/state.json';
+        StateStore::file($statePath)->bindSession('session-selection', 'acct-beta', 'new_session', 1_700_000_000, 1_700_000_000);
+
+        $server = $this->server([
+            'stateFile' => $statePath,
+        ]);
+
+        $method = new ReflectionMethod(CodexProxyServer::class, 'touchSessionBinding');
+        $method->invoke($server, new SessionKey('session-selection'), 1_700_000_120);
+
+        self::assertSame([
+            'account_id' => 'acct-beta',
+            'selection_source' => 'new_session',
+            'bound_at' => 1_700_000_000,
+            'last_seen_at' => 1_700_000_120,
+        ], StateStore::file($statePath)->sessionBinding('session-selection'));
+    }
+
     public function testReloadsSchedulerAccountsFromDisk(): void
     {
         $accountsDir = $this->tempDir('proxy-account-sync');

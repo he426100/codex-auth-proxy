@@ -37,6 +37,7 @@ final class AppConfigLoaderTest extends TestCase
             self::assertSame('https://chatgpt.com/backend-api/codex', $config->codexUpstreamBaseUrl);
             self::assertSame('https://chatgpt.com/backend-api', $config->usageBaseUrl);
             self::assertSame(600, $config->usageRefreshIntervalSeconds);
+            self::assertSame(21600, $config->activeSessionWindowSeconds);
             self::assertTrue($config->traceMutations);
             self::assertFalse($config->traceTimings);
             self::assertNull($config->httpProxy);
@@ -67,6 +68,7 @@ final class AppConfigLoaderTest extends TestCase
             $this->setEnv('CODEX_AUTH_PROXY_CODEX_UPSTREAM_BASE_URL', 'https://proxy.example.test/codex');
             $this->setEnv('CODEX_AUTH_PROXY_USAGE_BASE_URL', 'https://usage.example.test');
             $this->setEnv('CODEX_AUTH_PROXY_USAGE_REFRESH_INTERVAL_SECONDS', '120');
+            $this->setEnv('CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS', '7200');
             $this->setEnv('CODEX_AUTH_PROXY_HTTP_PROXY', 'http://auth-http:8888');
             $this->setEnv('CODEX_AUTH_PROXY_HTTPS_PROXY', 'https://auth-https:9443');
             $this->setEnv('CODEX_AUTH_PROXY_NO_PROXY', 'auth.local');
@@ -84,6 +86,7 @@ final class AppConfigLoaderTest extends TestCase
             self::assertSame('https://proxy.example.test/codex', $config->codexUpstreamBaseUrl);
             self::assertSame('https://usage.example.test', $config->usageBaseUrl);
             self::assertSame(120, $config->usageRefreshIntervalSeconds);
+            self::assertSame(7200, $config->activeSessionWindowSeconds);
             self::assertSame('http://auth-http:8888', $config->httpProxy);
             self::assertSame('https://auth-https:9443', $config->httpsProxy);
             self::assertSame('auth.local', $config->noProxy);
@@ -282,6 +285,7 @@ PHP);
             'CODEX_AUTH_PROXY_CODEX_RESIDENCY',
             'CODEX_AUTH_PROXY_USAGE_BASE_URL',
             'CODEX_AUTH_PROXY_USAGE_REFRESH_INTERVAL_SECONDS',
+            'CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS',
             'CODEX_AUTH_PROXY_TRACE_MUTATIONS',
             'CODEX_AUTH_PROXY_TRACE_TIMINGS',
             'CODEX_AUTH_PROXY_HTTP_PROXY',

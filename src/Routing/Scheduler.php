@@ -10,14 +10,42 @@ use RuntimeException;
 
 final class Scheduler
 {
+    private const DEFAULT_LOW_QUOTA_LEFT_THRESHOLD_PERCENT = 5.0;
+
     /** @var list<CodexAccount> */
     private array $accounts;
 
     /** @var array<string,CodexAccount> */
     private array $accountsById = [];
 
+    /**
+     * @var array{
+     *   revision:string,
+     *   by_index: array<int,array{
+     *     index:int,
+     *     account:CodexAccount,
+     *     availability:AccountAvailability,
+     *     low_quota:bool,
+     *     quota_score:?float
+     *   }>,
+     *   by_account_id: array<string,array{
+     *     index:int,
+     *     account:CodexAccount,
+     *     availability:AccountAvailability,
+     *     low_quota:bool,
+     *     quota_score:?float
+     *   }>
+     * }|null
+     */
+    private ?array $candidateSnapshot = null;
+
     /** @param list<CodexAccount> $accounts */
-    public function __construct(array $accounts, private readonly StateStore $state, private readonly mixed $clock = null)
+    public function __construct(
+        array $accounts,
+        private readonly StateStore $state,
+        private readonly mixed $clock = null,
+        private readonly float $lowQuotaLeftThresholdPercent = self::DEFAULT_LOW_QUOTA_LEFT_THRESHOLD_PERCENT,
+    )
     {
         $this->accounts = $accounts;
         foreach ($this->accounts as $account) {
@@ -25,12 +53,15 @@ final class Scheduler
         }
     }
 
-    public function accountForSession(string $sessionKey, ?string $fallbackSessionKey = null): CodexAccount
+    public function accountForSession(string $sessionKey, ?string $fallbackSessionKey = null, array &$selection = []): CodexAccount
     {
+        $snapshot = $this->candidateSnapshot();
         $boundAccountId = $this->state->sessionAccount($sessionKey);
         if ($boundAccountId !== null) {
             $bound = $this->accountsById[$boundAccountId] ?? null;
-            if ($bound !== null && $this->isAvailable($bound)) {
+            if ($bound !== null && $this->isAvailableInSnapshot($snapshot, $bound->accountId())) {
+                $this->state->touchSession($sessionKey, $this->now());
+                $selection = $this->selectionReport('bound_session', $bound);
                 return $bound;
             }
         }
@@ -38,14 +69,26 @@ final class Scheduler
         if ($fallbackSessionKey !== null && $fallbackSessionKey !== $sessionKey) {
             $fallbackAccountId = $this->state->sessionAccount($fallbackSessionKey);
             $fallback = $fallbackAccountId !== null ? ($this->accountsById[$fallbackAccountId] ?? null) : null;
-            if ($fallback !== null && $this->isAvailable($fallback)) {
-                $this->state->bindSession($sessionKey, $fallback->accountId());
+            if ($fallback !== null && $this->isAvailableInSnapshot($snapshot, $fallback->accountId())) {
+                $source = 'fallback_binding';
+                $this->state->bindSession($sessionKey, $fallback->accountId(), $source, $this->now());
+                $selection = $this->selectionReport($source, $fallback, [
+                    'fallback_session_key' => $fallbackSessionKey,
+                ]);
                 return $fallback;
             }
         }
 
-        $account = $this->selectAvailable();
-        $this->state->bindSession($sessionKey, $account->accountId());
+        $orderedCandidates = [];
+        $account = $this->selectAvailable(snapshot: $snapshot, orderedCandidates: $orderedCandidates);
+        $source = $boundAccountId !== null ? 'rebind_unavailable_session' : 'new_session';
+        $this->state->bindSession($sessionKey, $account->accountId(), $source, $this->now());
+        $selection = $this->selectionReport(
+            $source,
+            $account,
+            $boundAccountId !== null ? ['previous_account_id' => $boundAccountId] : [],
+            $orderedCandidates,
+        );
 
         return $account;
     }
@@ -70,76 +113,182 @@ final class Scheduler
     {
         $this->accounts = $accounts;
         $this->accountsById = [];
+        $this->candidateSnapshot = null;
         foreach ($this->accounts as $account) {
             $this->accountsById[$account->accountId()] = $account;
         }
     }
 
-    public function switchAfterHardFailure(string $sessionKey, int $cooldownSeconds, ?string $cooldownReason = null): CodexAccount
+    public function switchAfterHardFailure(string $sessionKey, int $cooldownSeconds, ?string $cooldownReason = null, array &$selection = []): CodexAccount
     {
         $failedAccountId = $this->state->sessionAccount($sessionKey);
         if ($failedAccountId !== null) {
-            $this->state->setCooldown($failedAccountId, $this->now() + $cooldownSeconds, $cooldownReason);
+            $now = $this->now();
+            $this->state->setCooldown($failedAccountId, $now + $cooldownSeconds, $cooldownReason, $now);
         }
 
-        $replacement = $this->selectAvailable($failedAccountId);
-        $this->state->bindSession($sessionKey, $replacement->accountId());
+        $orderedCandidates = [];
+        $replacement = $this->selectAvailable($failedAccountId, null, $orderedCandidates);
+        $source = 'hard_switch';
+        $this->state->bindSession($sessionKey, $replacement->accountId(), $source, $this->now());
+        $selection = $this->selectionReport($source, $replacement, [
+            'previous_account_id' => $failedAccountId,
+            'excluded_account_id' => $failedAccountId,
+            'cooldown_reason' => $cooldownReason,
+        ], $orderedCandidates);
 
         return $replacement;
     }
 
-    private function selectAvailable(?string $excludeAccountId = null): CodexAccount
+    /**
+     * @param array{
+     *   revision:string,
+     *   by_index: array<int,array{
+     *     index:int,
+     *     account:CodexAccount,
+     *     availability:AccountAvailability,
+     *     low_quota:bool,
+     *     quota_score:?float
+     *   }>,
+     *   by_account_id: array<string,array{
+     *     index:int,
+     *     account:CodexAccount,
+     *     availability:AccountAvailability,
+     *     low_quota:bool,
+     *     quota_score:?float
+     *   }>
+     * }|null $snapshot
+     * @param list<array{
+     *   account_id:string,
+     *   account:string,
+     *   priority:string,
+     *   confirmed_available:bool,
+     *   low_quota:bool,
+     *   quota_score:?float
+     * }> $orderedCandidates
+     * @param-out list<array{
+     *   account_id:string,
+     *   account:string,
+     *   priority:string,
+     *   confirmed_available:bool,
+     *   low_quota:bool,
+     *   quota_score:?float
+     * }> $orderedCandidates
+     */
+    private function selectAvailable(?string $excludeAccountId = null, ?array $snapshot = null, array &$orderedCandidates = []): CodexAccount
     {
         $count = count($this->accounts);
         if ($count === 0) {
             throw new RuntimeException('No Codex accounts configured');
         }
 
+        $snapshot ??= $this->candidateSnapshot();
         $start = $this->state->cursor() % $count;
-        $preferred = [];
-        $lowQuota = [];
+        $candidates = [];
         for ($offset = 0; $offset < $count; $offset++) {
             $index = ($start + $offset) % $count;
-            $account = $this->accounts[$index];
-            if ($account->accountId() === $excludeAccountId) {
+            $entry = $snapshot['by_index'][$index] ?? null;
+            if ($entry === null) {
                 continue;
             }
-            if (!$this->isAvailable($account)) {
-                continue;
-            }
-
-            if ($this->isLowQuota($account)) {
-                $lowQuota[] = [$index, $account];
+            if ($entry['account']->accountId() === $excludeAccountId) {
                 continue;
             }
 
-            $preferred[] = [$index, $account];
+            $candidates[] = $entry + ['rotation' => $offset];
         }
 
-        foreach (array_merge($preferred, $lowQuota) as [$index, $account]) {
-            $this->state->setCursor($index + 1);
-            return $account;
+        if ($candidates === []) {
+            throw new RuntimeException('No available Codex account');
         }
 
-        throw new RuntimeException('No available Codex account');
+        usort($candidates, fn (array $left, array $right): int => $this->compareCandidates($left, $right));
+        $orderedCandidates = [];
+        foreach ($candidates as $candidate) {
+            $orderedCandidates[] = $this->candidateTrace($candidate);
+        }
+        $selected = $candidates[0];
+        $this->state->setCursor($selected['index'] + 1);
+
+        return $selected['account'];
     }
 
-    private function isAvailable(CodexAccount $account): bool
+    /**
+     * @return array{
+     *   revision:string,
+     *   by_index: array<int,array{
+     *     index:int,
+     *     account:CodexAccount,
+     *     availability:AccountAvailability,
+     *     low_quota:bool,
+     *     quota_score:?float
+     *   }>,
+     *   by_account_id: array<string,array{
+     *     index:int,
+     *     account:CodexAccount,
+     *     availability:AccountAvailability,
+     *     low_quota:bool,
+     *     quota_score:?float
+     *   }>
+     * }
+     */
+    private function candidateSnapshot(): array
     {
-        $availability = AccountAvailability::from(
+        $revision = $this->state->candidateRevision();
+        if ($this->candidateSnapshot !== null && $this->candidateSnapshot['revision'] === $revision) {
+            return $this->candidateSnapshot;
+        }
+
+        $byIndex = [];
+        $byAccountId = [];
+        foreach ($this->accounts as $index => $account) {
+            $availability = $this->availability($account);
+            if (!$availability->routable) {
+                continue;
+            }
+
+            $entry = [
+                'index' => $index,
+                'account' => $account,
+                'availability' => $availability,
+                'low_quota' => $this->isLowQuota($availability),
+                'quota_score' => $this->quotaScore($availability),
+            ];
+            $byIndex[$index] = $entry;
+            $byAccountId[$account->accountId()] = $entry;
+        }
+
+        $this->candidateSnapshot = [
+            'revision' => $revision,
+            'by_index' => $byIndex,
+            'by_account_id' => $byAccountId,
+        ];
+
+        return $this->candidateSnapshot;
+    }
+
+    private function isAvailableInSnapshot(array $snapshot, string $accountId): bool
+    {
+        return isset($snapshot['by_account_id'][$accountId]);
+    }
+
+    private function availability(CodexAccount $account): AccountAvailability
+    {
+        return AccountAvailability::from(
             $account,
             $this->state->cooldownUntil($account->accountId()),
             $this->state->accountUsage($account->accountId()),
             $this->now(),
         );
-
-        return $availability->routable;
     }
 
-    private function isLowQuota(CodexAccount $account): bool
+    private function isLowQuota(AccountAvailability $availability): bool
     {
-        $usage = $this->state->accountUsage($account->accountId());
+        $usage = $availability->usage;
         if ($usage === null || $usage->error !== null) {
+            return false;
+        }
+        if ($this->lowQuotaLeftThresholdPercent <= 0.0) {
             return false;
         }
 
@@ -147,12 +296,121 @@ final class Scheduler
             if ($window === null) {
                 continue;
             }
-            if ($window->leftPercent > 0.0 && $window->leftPercent <= 5.0) {
+            if ($window->leftPercent > 0.0 && $window->leftPercent <= $this->lowQuotaLeftThresholdPercent) {
                 return true;
             }
         }
 
         return false;
+    }
+
+    private function quotaScore(AccountAvailability $availability): ?float
+    {
+        $usage = $availability->usage;
+        if (!$availability->isConfirmedAvailable || $usage === null || $usage->error !== null) {
+            return null;
+        }
+        if ($usage->primary === null || $usage->secondary === null) {
+            return null;
+        }
+
+        return min($usage->primary->leftPercent, $usage->secondary->leftPercent);
+    }
+
+    /** @param array{availability:AccountAvailability,low_quota:bool,quota_score:?float,rotation:int} $candidate */
+    private function candidatePriority(array $candidate): int
+    {
+        if ($candidate['low_quota']) {
+            return 2;
+        }
+        if ($candidate['quota_score'] !== null) {
+            return 0;
+        }
+
+        return 1;
+    }
+
+    /**
+     * @param array{availability:AccountAvailability,low_quota:bool,quota_score:?float,rotation:int} $left
+     * @param array{availability:AccountAvailability,low_quota:bool,quota_score:?float,rotation:int} $right
+     */
+    private function compareCandidates(array $left, array $right): int
+    {
+        $priority = $this->candidatePriority($left) <=> $this->candidatePriority($right);
+        if ($priority !== 0) {
+            return $priority;
+        }
+
+        $leftScore = $left['quota_score'];
+        $rightScore = $right['quota_score'];
+        if ($leftScore !== $rightScore) {
+            if ($leftScore === null) {
+                return 1;
+            }
+            if ($rightScore === null) {
+                return -1;
+            }
+
+            return $rightScore <=> $leftScore;
+        }
+
+        return $left['rotation'] <=> $right['rotation'];
+    }
+
+    private function selectionReport(string $source, CodexAccount $account, array $context = [], array $candidates = []): array
+    {
+        $report = [
+            'source' => $source,
+            'selected_account_id' => $account->accountId(),
+            'selected_account_name' => $account->name(),
+        ];
+
+        foreach (['previous_account_id', 'excluded_account_id', 'cooldown_reason', 'fallback_session_key'] as $key) {
+            if (isset($context[$key]) && is_string($context[$key]) && $context[$key] !== '') {
+                $report[$key] = $context[$key];
+            }
+        }
+        if ($candidates !== []) {
+            $report['candidates'] = $candidates;
+        }
+
+        return $report;
+    }
+
+    /**
+     * @param array{account:CodexAccount,availability:AccountAvailability,low_quota:bool,quota_score:?float} $candidate
+     * @return array{
+     *   account_id:string,
+     *   account:string,
+     *   priority:string,
+     *   confirmed_available:bool,
+     *   low_quota:bool,
+     *   quota_score:?float
+     * }
+     */
+    private function candidateTrace(array $candidate): array
+    {
+        return [
+            'account_id' => $candidate['account']->accountId(),
+            'account' => $candidate['account']->name(),
+            'priority' => $this->candidatePriorityLabel($candidate),
+            'confirmed_available' => $candidate['availability']->isConfirmedAvailable,
+            'low_quota' => $candidate['low_quota'],
+            'quota_score' => $candidate['quota_score'],
+        ];
+    }
+
+    /** @param array{availability:AccountAvailability,low_quota:bool,quota_score:?float} $candidate */
+    private function candidatePriorityLabel(array $candidate): string
+    {
+        if ($candidate['low_quota']) {
+            return 'low_quota';
+        }
+        if ($candidate['quota_score'] !== null) {
+            return 'confirmed_available';
+        }
+
+        return 'usage_unknown';
     }
 
     private function now(): int

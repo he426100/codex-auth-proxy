@@ -127,6 +127,18 @@ JSON;
         ], $result->mutations());
     }
 
+    public function testRemovesPromptCacheKeyWhenNativeAnchorExists(): void
+    {
+        $payload = '{"conversation_id":"conv-1","prompt_cache_key":"cache-1","input":[]}';
+
+        $result = (new ResponsesPayloadNormalizer())->normalizeHttpWithReport($payload);
+        $decoded = json_decode($result->payload(), false, flags: JSON_THROW_ON_ERROR);
+
+        self::assertSame('conv-1', $decoded->conversation_id);
+        self::assertObjectNotHasProperty('prompt_cache_key', $decoded);
+        self::assertContains('anchor.prompt_cache_key_removed', $result->mutations());
+    }
+
     public function testNormalizesWebSocketPayloadForHttpFallback(): void
     {
         $payload = '{"type":"response.create","input":"hello","tools":[{"type":"function","parameters":[]}]}';

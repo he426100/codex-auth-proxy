@@ -197,6 +197,184 @@ final class SchedulerTest extends TestCase
         self::assertSame('acct-alpha', $account->accountId());
     }
 
+    public function testPrefersHigherQuotaAccountsForNewSessions(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha')),
+            $validator->validate($this->accountFixture('beta')),
+        ];
+        $state = StateStore::memory();
+        $state->setAccountUsage('acct-alpha', new CachedAccountUsage(
+            'plus',
+            1000,
+            null,
+            new CachedRateLimitWindow(80.0, 20.0, 300, 1300),
+            new CachedRateLimitWindow(40.0, 60.0, 3600, 4600),
+        ));
+        $state->setAccountUsage('acct-beta', new CachedAccountUsage(
+            'plus',
+            1000,
+            null,
+            new CachedRateLimitWindow(10.0, 90.0, 300, 1300),
+            new CachedRateLimitWindow(5.0, 95.0, 3600, 4600),
+        ));
+        $scheduler = new Scheduler($accounts, $state, static fn (): int => 1000);
+
+        $selection = [];
+        $account = $scheduler->accountForSession('thread-best-quota', null, $selection);
+
+        self::assertSame('acct-beta', $account->accountId());
+        self::assertSame('new_session', $selection['source']);
+        self::assertSame('acct-beta', $selection['selected_account_id']);
+        self::assertSame('acct-beta', $selection['candidates'][0]['account_id']);
+        self::assertSame('acct-alpha', $selection['candidates'][1]['account_id']);
+        self::assertSame([
+            'account_id' => 'acct-beta',
+            'selection_source' => 'new_session',
+            'bound_at' => 1000,
+            'last_seen_at' => 1000,
+        ], $state->sessionBinding('thread-best-quota'));
+    }
+
+    public function testKeepsBoundSessionWhenQuotaRankingChanges(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha')),
+            $validator->validate($this->accountFixture('beta')),
+        ];
+        $state = StateStore::memory();
+        $now = 1000;
+        $scheduler = new Scheduler($accounts, $state, static function () use (&$now): int {
+            return $now;
+        });
+
+        $first = $scheduler->accountForSession('thread-sticky-ranking');
+        self::assertSame('acct-alpha', $first->accountId());
+
+        $state->setAccountUsage('acct-alpha', new CachedAccountUsage(
+            'plus',
+            1000,
+            null,
+            new CachedRateLimitWindow(80.0, 20.0, 300, 1300),
+            new CachedRateLimitWindow(40.0, 60.0, 3600, 4600),
+        ));
+        $state->setAccountUsage('acct-beta', new CachedAccountUsage(
+            'plus',
+            1000,
+            null,
+            new CachedRateLimitWindow(10.0, 90.0, 300, 1300),
+            new CachedRateLimitWindow(5.0, 95.0, 3600, 4600),
+        ));
+
+        $now = 1200;
+        $selection = [];
+        $second = $scheduler->accountForSession('thread-sticky-ranking', null, $selection);
+
+        self::assertSame('acct-alpha', $second->accountId());
+        self::assertSame('bound_session', $selection['source']);
+        self::assertSame('acct-alpha', $selection['selected_account_id']);
+        self::assertArrayNotHasKey('candidates', $selection);
+        self::assertSame([
+            'account_id' => 'acct-alpha',
+            'selection_source' => 'new_session',
+            'bound_at' => 1000,
+            'last_seen_at' => 1200,
+        ], $state->sessionBinding('thread-sticky-ranking'));
+    }
+
+    public function testRecordsFallbackBindingSourceInState(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha')),
+            $validator->validate($this->accountFixture('beta')),
+        ];
+        $state = StateStore::memory();
+        $scheduler = new Scheduler($accounts, $state, static fn (): int => 1000);
+
+        $scheduler->accountForSession('msg:short');
+        $scheduler->accountForSession('msg:full', 'msg:short');
+
+        self::assertSame([
+            'account_id' => 'acct-alpha',
+            'selection_source' => 'fallback_binding',
+            'bound_at' => 1000,
+            'last_seen_at' => 1000,
+        ], $state->sessionBinding('msg:full'));
+    }
+
+    public function testRecordsHardSwitchSourceInState(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha')),
+            $validator->validate($this->accountFixture('beta')),
+        ];
+        $state = StateStore::memory();
+        $scheduler = new Scheduler($accounts, $state, static fn (): int => 1000);
+
+        $scheduler->accountForSession('thread-switch');
+        $scheduler->switchAfterHardFailure('thread-switch', 300, 'quota');
+
+        self::assertSame([
+            'account_id' => 'acct-beta',
+            'selection_source' => 'hard_switch',
+            'bound_at' => 1000,
+            'last_seen_at' => 1000,
+        ], $state->sessionBinding('thread-switch'));
+        self::assertSame('quota', $state->lastCooldownReason('acct-alpha'));
+        self::assertSame(1000, $state->lastCooldownAt('acct-alpha'));
+    }
+
+    public function testRefreshesCandidateSnapshotWhenUsageChanges(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha')),
+            $validator->validate($this->accountFixture('beta')),
+        ];
+        $state = StateStore::memory();
+        $state->setAccountUsage('acct-alpha', new CachedAccountUsage(
+            'plus',
+            1000,
+            null,
+            new CachedRateLimitWindow(80.0, 20.0, 300, 1300),
+            new CachedRateLimitWindow(40.0, 60.0, 3600, 4600),
+        ));
+        $state->setAccountUsage('acct-beta', new CachedAccountUsage(
+            'plus',
+            1000,
+            null,
+            new CachedRateLimitWindow(10.0, 90.0, 300, 1300),
+            new CachedRateLimitWindow(5.0, 95.0, 3600, 4600),
+        ));
+        $scheduler = new Scheduler($accounts, $state, static fn (): int => 1000);
+
+        $first = $scheduler->accountForSession('thread-snapshot-first');
+        self::assertSame('acct-beta', $first->accountId());
+
+        $state->setAccountUsage('acct-alpha', new CachedAccountUsage(
+            'plus',
+            1001,
+            null,
+            new CachedRateLimitWindow(5.0, 95.0, 300, 1301),
+            new CachedRateLimitWindow(5.0, 95.0, 3600, 4601),
+        ));
+        $state->setAccountUsage('acct-beta', new CachedAccountUsage(
+            'plus',
+            1001,
+            null,
+            new CachedRateLimitWindow(90.0, 10.0, 300, 1301),
+            new CachedRateLimitWindow(85.0, 15.0, 3600, 4601),
+        ));
+
+        $second = $scheduler->accountForSession('thread-snapshot-second');
+
+        self::assertSame('acct-alpha', $second->accountId());
+    }
+
     public function testDoesNotSkipExhaustedAccountsAfterRefreshError(): void
     {
         $validator = new AccountFileValidator();

@@ -252,6 +252,8 @@ final class ApplicationTest extends TestCase
     {
         $home = $this->tempDir('cap-home');
         $source = $home . '/auth.json';
+        $now = time();
+        $lastBoundAt = $now - 30;
         $this->writeJson($source, [
             'auth_mode' => 'chatgpt',
             'tokens' => $this->accountFixture('alpha')['tokens'],
@@ -262,6 +264,22 @@ final class ApplicationTest extends TestCase
             'accounts' => [
                 'acct-alpha' => [
                     'cooldown_until' => 1776756600,
+                ],
+            ],
+            'sessions' => [
+                'thread-1' => 'acct-alpha',
+                'thread-2' => 'acct-alpha',
+            ],
+            'session_meta' => [
+                'thread-1' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $now - 180,
+                    'last_seen_at' => $now - 120,
+                ],
+                'thread-2' => [
+                    'selection_source' => 'hard_switch',
+                    'bound_at' => $lastBoundAt,
+                    'last_seen_at' => $lastBoundAt,
                 ],
             ],
             'usage' => [
@@ -297,8 +315,10 @@ final class ApplicationTest extends TestCase
         self::assertStringContainsString('alpha', $tester->getDisplay());
         self::assertStringContainsString('alpha@example.com', $tester->getDisplay());
         self::assertStringContainsString('Plus', $tester->getDisplay());
+        self::assertStringContainsString('Next new session: alpha', $tester->getDisplay());
         self::assertStringContainsString('7%', $tester->getDisplay());
         self::assertStringContainsString('85%', $tester->getDisplay());
+        self::assertStringContainsString('2', $tester->getDisplay());
         self::assertStringContainsString('yes', $tester->getDisplay());
         self::assertStringContainsString('stale cache', $tester->getDisplay());
     }
@@ -328,6 +348,10 @@ final class ApplicationTest extends TestCase
     {
         $home = $this->tempDir('cap-home');
         $source = $home . '/auth.json';
+        $now = time();
+        $lastBoundAt = $now - 30;
+        $firstSeenAt = $now - 120;
+        $lastSeenAt = $now - 10;
         $this->writeJson($source, [
             'auth_mode' => 'chatgpt',
             'tokens' => $this->accountFixture('alpha')['tokens'],
@@ -338,6 +362,22 @@ final class ApplicationTest extends TestCase
             'accounts' => [
                 'acct-alpha' => [
                     'cooldown_until' => 1776756600,
+                ],
+            ],
+            'sessions' => [
+                'thread-1' => 'acct-alpha',
+                'thread-2' => 'acct-alpha',
+            ],
+            'session_meta' => [
+                'thread-1' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $now - 180,
+                    'last_seen_at' => $firstSeenAt,
+                ],
+                'thread-2' => [
+                    'selection_source' => 'hard_switch',
+                    'bound_at' => $lastBoundAt,
+                    'last_seen_at' => $lastSeenAt,
                 ],
             ],
             'usage' => [
@@ -372,10 +412,20 @@ final class ApplicationTest extends TestCase
         self::assertIsArray($payload);
         self::assertCount(1, $payload);
         self::assertTrue($payload[0]['enabled']);
+        self::assertSame(2, $payload[0]['session_count']);
+        self::assertSame(2, $payload[0]['binding_count']);
+        self::assertSame('hard_switch', $payload[0]['last_selection_source']);
+        self::assertSame($lastBoundAt, $payload[0]['last_bound_at']);
+        self::assertSame($lastSeenAt, $payload[0]['last_seen_at']);
         self::assertSame(1776756600, $payload[0]['cooldown_until']);
+        self::assertNull($payload[0]['last_cooldown_reason']);
+        self::assertNull($payload[0]['last_cooldown_at']);
         self::assertEquals(7.0, $payload[0]['primary_left_percent']);
         self::assertSame('ok', $payload[0]['availability_reason']);
         self::assertSame('cached failure', $payload[0]['error']);
+        self::assertSame(1, $payload[0]['selection_rank']);
+        self::assertTrue($payload[0]['selected_for_new_session']);
+        self::assertSame('usage_unknown', $payload[0]['selection_priority']);
         self::assertIsBool($payload[0]['enabled']);
         self::assertIsInt($payload[0]['cooldown_until']);
         self::assertTrue(is_int($payload[0]['primary_left_percent']) || is_float($payload[0]['primary_left_percent']));
@@ -390,7 +440,8 @@ final class ApplicationTest extends TestCase
         $home = $this->tempDir('cap-home');
         $alphaSource = $home . '/alpha.json';
         $betaSource = $home . '/beta.json';
-        $cooldownUntil = time() + 1800;
+        $now = time();
+        $cooldownUntil = $now + 1800;
         $this->writeJson($alphaSource, [
             'auth_mode' => 'chatgpt',
             'tokens' => $this->accountFixture('alpha')['tokens'],
@@ -411,6 +462,18 @@ final class ApplicationTest extends TestCase
             'sessions' => [
                 'thread-1' => 'acct-alpha',
                 'thread-2' => 'acct-beta',
+            ],
+            'session_meta' => [
+                'thread-1' => [
+                    'selection_source' => 'hard_switch',
+                    'bound_at' => $now - 120,
+                    'last_seen_at' => $now - 60,
+                ],
+                'thread-2' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $now - 28800,
+                    'last_seen_at' => $now - 28800,
+                ],
             ],
             'cursor' => 0,
             'usage' => [
@@ -447,6 +510,9 @@ final class ApplicationTest extends TestCase
         self::assertStringContainsString('alpha', $tester->getDisplay());
         self::assertStringContainsString('beta', $tester->getDisplay());
         self::assertStringContainsString('alpha@example.com', $tester->getDisplay());
+        self::assertStringContainsString('hard_switch', $tester->getDisplay());
+        self::assertStringContainsString('active @', $tester->getDisplay());
+        self::assertStringContainsString('stale @', $tester->getDisplay());
         self::assertStringContainsString('cooldown (auth)', $tester->getDisplay());
     }
 
@@ -486,6 +552,107 @@ final class ApplicationTest extends TestCase
         self::assertTrue(strpos($tester->getDisplay(), 'thread-1') < strpos($tester->getDisplay(), 'thread-2'));
     }
 
+    public function testAccountsBindingsFiltersRowsByActivity(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $alphaSource = $home . '/alpha.json';
+        $betaSource = $home . '/beta.json';
+        $now = time();
+        $this->writeJson($alphaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+        $this->writeJson($betaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('beta')['tokens'],
+        ]);
+
+        mkdir($home . '/.config/codex-auth-proxy', 0700, true);
+        $this->writeJson($home . '/.config/codex-auth-proxy/state.json', [
+            'accounts' => [],
+            'sessions' => [
+                'thread-active' => 'acct-alpha',
+                'thread-stale' => 'acct-beta',
+            ],
+            'session_meta' => [
+                'thread-active' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $now - 120,
+                    'last_seen_at' => $now - 60,
+                ],
+                'thread-stale' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $now - 28800,
+                    'last_seen_at' => $now - 28800,
+                ],
+            ],
+            'cursor' => 0,
+            'usage' => [],
+        ]);
+
+        $application = new Application($home);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $alphaSource]);
+        (new CommandTester($application->find('import')))->execute(['name' => 'beta', '--from' => $betaSource]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute(['action' => 'bindings', '--activity' => 'stale']);
+
+        self::assertSame(0, $code);
+        self::assertStringNotContainsString('thread-active', $tester->getDisplay());
+        self::assertStringContainsString('thread-stale', $tester->getDisplay());
+        self::assertStringContainsString('stale @', $tester->getDisplay());
+    }
+
+    public function testAccountsBindingsFiltersRowsByAccount(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $alphaSource = $home . '/alpha.json';
+        $betaSource = $home . '/beta.json';
+        $now = time();
+        $this->writeJson($alphaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+        $this->writeJson($betaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('beta')['tokens'],
+        ]);
+
+        mkdir($home . '/.config/codex-auth-proxy', 0700, true);
+        $this->writeJson($home . '/.config/codex-auth-proxy/state.json', [
+            'accounts' => [],
+            'sessions' => [
+                'thread-alpha' => 'acct-alpha',
+                'thread-beta' => 'acct-beta',
+            ],
+            'session_meta' => [
+                'thread-alpha' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $now - 120,
+                    'last_seen_at' => $now - 60,
+                ],
+                'thread-beta' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $now - 120,
+                    'last_seen_at' => $now - 60,
+                ],
+            ],
+            'cursor' => 0,
+            'usage' => [],
+        ]);
+
+        $application = new Application($home);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $alphaSource]);
+        (new CommandTester($application->find('import')))->execute(['name' => 'beta', '--from' => $betaSource]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute(['action' => 'bindings', '--account' => 'beta']);
+
+        self::assertSame(0, $code);
+        self::assertStringNotContainsString('thread-alpha', $tester->getDisplay());
+        self::assertStringContainsString('thread-beta', $tester->getDisplay());
+    }
+
     public function testAccountsBindingsJsonUsesStructuredFieldsAndSessionFilter(): void
     {
         $home = $this->tempDir('cap-home');
@@ -506,6 +673,13 @@ final class ApplicationTest extends TestCase
             ],
             'sessions' => [
                 'thread-1' => 'acct-alpha',
+            ],
+            'session_meta' => [
+                'thread-1' => [
+                    'selection_source' => 'hard_switch',
+                    'bound_at' => $cooldownUntil - 60,
+                    'last_seen_at' => $cooldownUntil - 60,
+                ],
             ],
             'cursor' => 0,
             'usage' => [
@@ -546,8 +720,398 @@ final class ApplicationTest extends TestCase
         self::assertSame('plus', $payload[0]['plan_type']);
         self::assertSame($cooldownUntil, $payload[0]['cooldown_until']);
         self::assertSame('auth', $payload[0]['cooldown_reason']);
+        self::assertSame('hard_switch', $payload[0]['selection_source']);
+        self::assertSame($cooldownUntil - 60, $payload[0]['bound_at']);
+        self::assertSame($cooldownUntil - 60, $payload[0]['last_seen_at']);
+        self::assertSame('active', $payload[0]['activity']);
+        self::assertTrue($payload[0]['is_active']);
         self::assertSame('cooldown', $payload[0]['availability_reason']);
         self::assertFalse($payload[0]['routable']);
+    }
+
+    public function testAccountsBindingsJsonFiltersRowsByActivity(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $alphaSource = $home . '/alpha.json';
+        $betaSource = $home . '/beta.json';
+        $now = time();
+        $this->writeJson($alphaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+        $this->writeJson($betaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('beta')['tokens'],
+        ]);
+
+        mkdir($home . '/.config/codex-auth-proxy', 0700, true);
+        $this->writeJson($home . '/.config/codex-auth-proxy/state.json', [
+            'accounts' => [],
+            'sessions' => [
+                'thread-active' => 'acct-alpha',
+                'thread-stale' => 'acct-beta',
+            ],
+            'session_meta' => [
+                'thread-active' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $now - 120,
+                    'last_seen_at' => $now - 60,
+                ],
+                'thread-stale' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $now - 28800,
+                    'last_seen_at' => $now - 28800,
+                ],
+            ],
+            'cursor' => 0,
+            'usage' => [],
+        ]);
+
+        $application = new Application($home);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $alphaSource]);
+        (new CommandTester($application->find('import')))->execute(['name' => 'beta', '--from' => $betaSource]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute(['action' => 'bindings', '--activity' => 'active', '--json' => true]);
+
+        $payload = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame(0, $code);
+        self::assertCount(1, $payload);
+        self::assertSame('thread-active', $payload[0]['session_key']);
+        self::assertSame('active', $payload[0]['activity']);
+        self::assertTrue($payload[0]['is_active']);
+    }
+
+    public function testAccountsBindingsJsonFiltersRowsByAccount(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $alphaSource = $home . '/alpha.json';
+        $betaSource = $home . '/beta.json';
+        $now = time();
+        $this->writeJson($alphaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+        $this->writeJson($betaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('beta')['tokens'],
+        ]);
+
+        mkdir($home . '/.config/codex-auth-proxy', 0700, true);
+        $this->writeJson($home . '/.config/codex-auth-proxy/state.json', [
+            'accounts' => [],
+            'sessions' => [
+                'thread-alpha' => 'acct-alpha',
+                'thread-beta' => 'acct-beta',
+            ],
+            'session_meta' => [
+                'thread-alpha' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $now - 120,
+                    'last_seen_at' => $now - 60,
+                ],
+                'thread-beta' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $now - 120,
+                    'last_seen_at' => $now - 60,
+                ],
+            ],
+            'cursor' => 0,
+            'usage' => [],
+        ]);
+
+        $application = new Application($home);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $alphaSource]);
+        (new CommandTester($application->find('import')))->execute(['name' => 'beta', '--from' => $betaSource]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute(['action' => 'bindings', '--account' => 'beta', '--json' => true]);
+
+        $payload = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame(0, $code);
+        self::assertCount(1, $payload);
+        self::assertSame('thread-beta', $payload[0]['session_key']);
+        self::assertSame('acct-beta', $payload[0]['account_id']);
+    }
+
+    public function testAccountsListCountsOnlyActiveSessionsWithinConfiguredWindow(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $source = $home . '/alpha.json';
+        $now = time();
+        $this->writeJson($source, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+
+        mkdir($home . '/.config/codex-auth-proxy', 0700, true);
+        $this->writeJson($home . '/.config/codex-auth-proxy/state.json', [
+            'accounts' => [],
+            'sessions' => [
+                'thread-fresh' => 'acct-alpha',
+                'thread-stale' => 'acct-alpha',
+            ],
+            'session_meta' => [
+                'thread-fresh' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $now - 120,
+                    'last_seen_at' => $now - 300,
+                ],
+                'thread-stale' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $now - 7200,
+                    'last_seen_at' => $now - 7200,
+                ],
+            ],
+            'cursor' => 0,
+            'usage' => [
+                'acct-alpha' => [
+                    'plan_type' => 'plus',
+                    'checked_at' => $now,
+                    'error' => null,
+                    'primary' => [
+                        'used_percent' => 10.0,
+                        'left_percent' => 90.0,
+                        'window_minutes' => 300,
+                    ],
+                    'secondary' => [
+                        'used_percent' => 10.0,
+                        'left_percent' => 90.0,
+                        'window_minutes' => 10080,
+                    ],
+                ],
+            ],
+        ]);
+
+        $originalServer = $_SERVER['CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS'] ?? null;
+        $originalEnv = $_ENV['CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS'] ?? null;
+        $originalPutenv = getenv('CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS');
+        $_SERVER['CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS'] = '3600';
+        $_ENV['CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS'] = '3600';
+        putenv('CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS=3600');
+
+        try {
+            $application = new Application($home);
+            (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $source]);
+
+            $tester = new CommandTester($application->find('accounts'));
+            $code = $tester->execute(['--json' => true]);
+
+            $payload = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+            self::assertSame(0, $code);
+            self::assertSame(1, $payload[0]['session_count']);
+            self::assertSame(2, $payload[0]['binding_count']);
+            self::assertSame($now - 300, $payload[0]['last_seen_at']);
+        } finally {
+            if ($originalServer === null) {
+                unset($_SERVER['CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS']);
+            } else {
+                $_SERVER['CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS'] = $originalServer;
+            }
+            if ($originalEnv === null) {
+                unset($_ENV['CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS']);
+            } else {
+                $_ENV['CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS'] = $originalEnv;
+            }
+            if ($originalPutenv === false) {
+                putenv('CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS');
+            } else {
+                putenv('CODEX_AUTH_PROXY_ACTIVE_SESSION_WINDOW_SECONDS=' . $originalPutenv);
+            }
+        }
+    }
+
+    public function testAccountsListDoesNotCountLegacyBindingsWithoutSeenTimestampAsActiveSessions(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $source = $home . '/alpha.json';
+        $this->writeJson($source, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+
+        mkdir($home . '/.config/codex-auth-proxy', 0700, true);
+        $this->writeJson($home . '/.config/codex-auth-proxy/state.json', [
+            'accounts' => [],
+            'sessions' => [
+                'thread-legacy' => 'acct-alpha',
+            ],
+            'cursor' => 0,
+            'usage' => [
+                'acct-alpha' => [
+                    'plan_type' => 'plus',
+                    'checked_at' => 1_700_000_000,
+                    'error' => null,
+                    'primary' => [
+                        'used_percent' => 10.0,
+                        'left_percent' => 90.0,
+                        'window_minutes' => 300,
+                    ],
+                    'secondary' => [
+                        'used_percent' => 10.0,
+                        'left_percent' => 90.0,
+                        'window_minutes' => 10080,
+                    ],
+                ],
+            ],
+        ]);
+
+        $application = new Application($home);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $source]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute(['--json' => true]);
+
+        $payload = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame(0, $code);
+        self::assertSame(0, $payload[0]['session_count']);
+        self::assertSame(1, $payload[0]['binding_count']);
+        self::assertNull($payload[0]['last_seen_at']);
+    }
+
+    public function testAccountsPickPreviewsBestCandidateWithoutMutatingState(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $alphaSource = $home . '/alpha.json';
+        $betaSource = $home . '/beta.json';
+        $this->writeJson($alphaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+        $this->writeJson($betaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('beta')['tokens'],
+        ]);
+
+        mkdir($home . '/.config/codex-auth-proxy', 0700, true);
+        $statePath = $home . '/.config/codex-auth-proxy/state.json';
+        $this->writeJson($statePath, [
+            'accounts' => [],
+            'sessions' => [],
+            'cursor' => 0,
+            'usage' => [
+                'acct-alpha' => [
+                    'plan_type' => 'plus',
+                    'checked_at' => 1_700_000_000,
+                    'error' => null,
+                    'primary' => [
+                        'used_percent' => 80.0,
+                        'left_percent' => 20.0,
+                        'window_minutes' => 300,
+                    ],
+                    'secondary' => [
+                        'used_percent' => 30.0,
+                        'left_percent' => 70.0,
+                        'window_minutes' => 10080,
+                    ],
+                ],
+                'acct-beta' => [
+                    'plan_type' => 'plus',
+                    'checked_at' => 1_700_000_000,
+                    'error' => null,
+                    'primary' => [
+                        'used_percent' => 10.0,
+                        'left_percent' => 90.0,
+                        'window_minutes' => 300,
+                    ],
+                    'secondary' => [
+                        'used_percent' => 20.0,
+                        'left_percent' => 80.0,
+                        'window_minutes' => 10080,
+                    ],
+                ],
+            ],
+        ]);
+
+        $application = new Application($home);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $alphaSource]);
+        (new CommandTester($application->find('import')))->execute(['name' => 'beta', '--from' => $betaSource]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute(['action' => 'pick', '--json' => true]);
+
+        $payload = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        $state = json_decode((string) file_get_contents($statePath), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame(0, $code);
+        self::assertNull($payload['session_key']);
+        self::assertSame('new_session', $payload['source']);
+        self::assertSame('beta', $payload['selected_account']['name']);
+        self::assertSame('acct-beta', $payload['selection']['selected_account_id']);
+        self::assertSame('acct-beta', $payload['selection']['candidates'][0]['account_id']);
+        self::assertSame([], $state['sessions']);
+    }
+
+    public function testAccountsPickPreservesBoundSessionStickiness(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $alphaSource = $home . '/alpha.json';
+        $betaSource = $home . '/beta.json';
+        $this->writeJson($alphaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('alpha')['tokens'],
+        ]);
+        $this->writeJson($betaSource, [
+            'auth_mode' => 'chatgpt',
+            'tokens' => $this->accountFixture('beta')['tokens'],
+        ]);
+
+        mkdir($home . '/.config/codex-auth-proxy', 0700, true);
+        $statePath = $home . '/.config/codex-auth-proxy/state.json';
+        $this->writeJson($statePath, [
+            'accounts' => [],
+            'sessions' => [
+                'thread-1' => 'acct-alpha',
+            ],
+            'cursor' => 0,
+            'usage' => [
+                'acct-alpha' => [
+                    'plan_type' => 'plus',
+                    'checked_at' => 1_700_000_000,
+                    'error' => null,
+                    'primary' => [
+                        'used_percent' => 30.0,
+                        'left_percent' => 70.0,
+                        'window_minutes' => 300,
+                    ],
+                    'secondary' => [
+                        'used_percent' => 20.0,
+                        'left_percent' => 80.0,
+                        'window_minutes' => 10080,
+                    ],
+                ],
+                'acct-beta' => [
+                    'plan_type' => 'plus',
+                    'checked_at' => 1_700_000_000,
+                    'error' => null,
+                    'primary' => [
+                        'used_percent' => 5.0,
+                        'left_percent' => 95.0,
+                        'window_minutes' => 300,
+                    ],
+                    'secondary' => [
+                        'used_percent' => 1.0,
+                        'left_percent' => 99.0,
+                        'window_minutes' => 10080,
+                    ],
+                ],
+            ],
+        ]);
+
+        $application = new Application($home);
+        (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $alphaSource]);
+        (new CommandTester($application->find('import')))->execute(['name' => 'beta', '--from' => $betaSource]);
+
+        $tester = new CommandTester($application->find('accounts'));
+        $code = $tester->execute(['action' => 'pick', 'name' => 'thread-1', '--json' => true]);
+
+        $payload = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        $state = json_decode((string) file_get_contents($statePath), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame(0, $code);
+        self::assertSame('thread-1', $payload['session_key']);
+        self::assertSame('bound_session', $payload['source']);
+        self::assertSame('alpha', $payload['selected_account']['name']);
+        self::assertArrayNotHasKey('candidates', $payload['selection']);
+        self::assertSame(['thread-1' => 'acct-alpha'], $state['sessions']);
     }
 
     public function testAccountsStatusShowsAccountPlanAndQuota(): void
@@ -566,6 +1130,19 @@ final class ApplicationTest extends TestCase
         ));
         $application = new Application($home, usageClient: $usageClient);
         (new CommandTester($application->find('import')))->execute(['name' => 'alpha', '--from' => $source]);
+        $statePath = $home . '/.config/codex-auth-proxy/state.json';
+        $this->writeJson($statePath, [
+            'accounts' => [
+                'acct-alpha' => [
+                    'last_cooldown_reason' => 'quota',
+                    'last_cooldown_at' => 1776750000,
+                ],
+            ],
+            'sessions' => [],
+            'session_meta' => [],
+            'cursor' => 0,
+            'usage' => [],
+        ]);
 
         $tester = new CommandTester($application->find('accounts'));
         $code = $tester->execute(['action' => 'status', 'name' => 'alpha']);
@@ -574,8 +1151,9 @@ final class ApplicationTest extends TestCase
         self::assertStringContainsString('Account: alpha@example.com (Plus)', $tester->getDisplay());
         self::assertStringContainsString('5h limit: 7% left', $tester->getDisplay());
         self::assertStringContainsString('Weekly limit: 85% left', $tester->getDisplay());
+        self::assertStringContainsString('Last cooldown: quota @ ' . date('Y-m-d H:i', 1776750000), $tester->getDisplay());
 
-        $state = json_decode((string) file_get_contents($home . '/.config/codex-auth-proxy/state.json'), true, flags: JSON_THROW_ON_ERROR);
+        $state = json_decode((string) file_get_contents($statePath), true, flags: JSON_THROW_ON_ERROR);
         self::assertSame('plus', $state['usage']['acct-alpha']['plan_type']);
         self::assertEquals(7.0, $state['usage']['acct-alpha']['primary']['left_percent']);
         self::assertNull($state['usage']['acct-alpha']['error']);
