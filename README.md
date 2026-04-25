@@ -190,6 +190,8 @@ Set `CODEX_AUTH_PROXY_USAGE_REFRESH_INTERVAL_SECONDS=0` to disable the `serve` b
 
 When `CODEX_AUTH_PROXY_LOG_FILE` and `CODEX_AUTH_PROXY_TRACE_FILE` are left empty, source runs write logs to `runtime/logs` under the project root, and PHAR runs write logs to `runtime/logs` next to the `.phar` file. Set `CODEX_AUTH_PROXY_TRACE_MUTATIONS=true` to record normalization events, and `CODEX_AUTH_PROXY_TRACE_TIMINGS=true` to record request timing. Trace logs do not store prompt content, OAuth tokens, or raw authorization headers.
 
+Run `php bin/codex-auth-proxy trace` to summarize WebSocket retries, HTTP fallbacks, `stream disconnected before response.completed` terminal events, and lineage errors from the trace log. Use `--file=/path/to/trace.jsonl` for a specific trace file.
+
 If `serve` logs an upstream WebSocket or HTTPS failure with `status -1`, the Swoole client did not receive an upstream HTTP response. On networks that cannot connect to `chatgpt.com` directly, set `CODEX_AUTH_PROXY_HTTPS_PROXY` to a supported proxy URL such as `http://127.0.0.1:7890` or `socks5://127.0.0.1:7890`. Do not use an `https://` proxy URL for `serve`; Swoole upstream forwarding only supports HTTP and SOCKS5 proxy configuration.
 
 ## Routing Policy

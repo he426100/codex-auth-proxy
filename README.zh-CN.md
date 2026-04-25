@@ -246,6 +246,8 @@ CODEX_AUTH_PROXY_NO_PROXY=localhost,127.0.0.1,::1
 
 `CODEX_AUTH_PROXY_LOG_FILE` 和 `CODEX_AUTH_PROXY_TRACE_FILE` 留空时，源码运行会把日志写到项目根目录下的 `runtime/logs`，PHAR 运行会写到 `.phar` 同目录下的 `runtime/logs`。开启 `CODEX_AUTH_PROXY_TRACE_MUTATIONS=true` 可记录兼容改写事件，开启 `CODEX_AUTH_PROXY_TRACE_TIMINGS=true` 可记录请求耗时。trace 不保存 prompt 内容、OAuth token 和原始 authorization header。
 
+使用 `php bin/codex-auth-proxy trace` 可以汇总 trace 日志里的 WebSocket retry、HTTP fallback、`stream disconnected before response.completed` 终止事件和 lineage 错误；需要分析指定文件时加 `--file=/path/to/trace.jsonl`。
+
 如果 `serve` 日志里出现 upstream WebSocket 或 HTTPS `status -1`，说明 Swoole client 没有拿到上游 HTTP 响应。当前网络不能直连 `chatgpt.com` 时，需要把 `CODEX_AUTH_PROXY_HTTPS_PROXY` 设置为支持的代理 URL，例如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:7890`。不要给 `serve` 配置 `https://` 代理 URL；Swoole 上游转发只支持 HTTP 和 SOCKS5 proxy 配置。
 
 ## 路由策略

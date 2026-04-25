@@ -548,6 +548,15 @@ final class CodexProxyServer
                         'account' => $account->name(),
                         'error' => $throwable->getMessage(),
                     ]);
+                    $this->traceTransportRecovery(
+                        $requestId,
+                        'websocket_http_fallback',
+                        $sessionKey,
+                        $account,
+                        'http_fallback',
+                        'upgrade_failed',
+                        $throwable->getMessage(),
+                    );
                     try {
                         $this->forwardWebSocketPayloadOverHttp(
                             $server,
@@ -600,6 +609,15 @@ final class CodexProxyServer
             $this->pushWebSocketError($server, $fd, 502, $this->upstreamClientError('WebSocket send', $client));
             return;
         }
+        $this->traceTransportRecovery(
+            $requestId,
+            'websocket_retry',
+            $sessionKey,
+            $account,
+            'retry',
+            'send_failed_before_response',
+            $this->upstreamClientError('WebSocket send', $client),
+        );
 
         try {
             $authRefreshAttempts = [];
@@ -755,6 +773,18 @@ final class CodexProxyServer
         $selectionContext = $this->selectionTraceContextForPayload($body, $this->preferredAccountIdForPayload($body));
         while (true) {
             $result = $this->forwardWebSocketHttpAttempt($server, $fd, $request, $account, $body, $headers, $turnState, $turnMetadata);
+            if ($result['terminal_incomplete']) {
+                $this->traceTransportRecovery(
+                    $requestId,
+                    'websocket_incomplete_terminal',
+                    $sessionKey,
+                    $account,
+                    'terminal',
+                    'http_fallback_incomplete',
+                    $this->incompleteStreamMessage(),
+                    502,
+                );
+            }
             $classification = $classifier->classifyHttpResponse($result['status'], $result['body'], $result['headers']);
             if ($classification->type() === 'lineage' && !$result['forwarded']) {
                 $this->traceUpstreamError($requestId, 'websocket', 'http_fallback_lineage_terminal', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
@@ -791,7 +821,7 @@ final class CodexProxyServer
         }
     }
 
-    /** @return array{status:int,body:string,headers:array<string,string>,forwarded:bool,completed:bool} */
+    /** @return array{status:int,body:string,headers:array<string,string>,forwarded:bool,completed:bool,terminal_incomplete:bool} */
     private function forwardWebSocketHttpAttempt(Server $server, int $fd, Request $request, CodexAccount $account, string $body, UpstreamHeaderFactory $headers, ?string $turnState = null, ?string $turnMetadata = null): array
     {
         $target = new UpstreamTarget($this->upstreamBase);
@@ -800,6 +830,7 @@ final class CodexProxyServer
         $forwarded = false;
         $completed = false;
         $terminalErrorSent = false;
+        $terminalIncomplete = false;
         $seenRawBody = '';
 
         $client = new Client($host, $port, $ssl);
@@ -871,6 +902,7 @@ final class CodexProxyServer
         if ($status < 400 && !$completed && !$terminalErrorSent && !$bufferedError) {
             $this->pushWebSocketError($server, $fd, 502, $this->incompleteStreamMessage());
             $forwarded = true;
+            $terminalIncomplete = true;
         }
 
         return [
@@ -879,6 +911,7 @@ final class CodexProxyServer
             'headers' => $responseHeaders,
             'forwarded' => $forwarded,
             'completed' => $completed,
+            'terminal_incomplete' => $terminalIncomplete,
         ];
     }
 
@@ -1415,8 +1448,8 @@ final class CodexProxyServer
                 $sessionRegistry->releaseRequestTurn($fd);
                 return;
             }
+            $lastPayload = $sessionRegistry->lastPayloadForSession($sessionId);
             if (!$forwardedData) {
-                $lastPayload = $sessionRegistry->lastPayloadForSession($sessionId);
                 if ($lastPayload !== null && $retryTracker->claimRetry($fd, $lastPayload['payload'], $account->accountId(), false)) {
                     $turnContext = [
                         'key' => $lastPayload['turnKey'],
@@ -1428,6 +1461,15 @@ final class CodexProxyServer
                         'session' => $lastPayload['sessionKey']->primary,
                         'account' => $account->name(),
                     ]);
+                    $this->traceTransportRecovery(
+                        $requestId,
+                        'websocket_retry',
+                        $lastPayload['sessionKey'],
+                        $account,
+                        'retry',
+                        'closed_before_first_payload',
+                        $this->incompleteStreamMessage(),
+                    );
                     try {
                         $authRefreshAttempts = [];
                         [$replacementClient, $replacement] = $this->openUpstreamWebSocketWithRecovery(
@@ -1463,6 +1505,18 @@ final class CodexProxyServer
             }
             $sessionRegistry->markRequestActive($fd, false);
             $sessionRegistry->releaseRequestTurn($fd);
+            $requestId = $this->requestIdFactory->fromHeaders($request->header ?? []);
+            $traceSessionKey = $lastPayload['sessionKey'] ?? new SessionKey($sessionId);
+            $this->traceTransportRecovery(
+                $requestId,
+                'websocket_incomplete_terminal',
+                $traceSessionKey,
+                $account,
+                'terminal',
+                'stream_closed_before_completed',
+                $this->incompleteStreamMessage(),
+                502,
+            );
             $this->pushWebSocketError($server, $fd, 502, $this->incompleteStreamMessage());
         });
     }
@@ -1830,6 +1884,52 @@ final class CodexProxyServer
             ] + $this->sessionTraceContext($sessionKey));
         } catch (Throwable $throwable) {
             $this->activeLogger->warning('Failed to write request trace', [
+                'request_id' => $requestId,
+                'error' => $throwable->getMessage(),
+            ]);
+        }
+    }
+
+    private function traceTransportRecovery(
+        string $requestId,
+        string $phase,
+        SessionKey $sessionKey,
+        ?CodexAccount $account,
+        string $recovery,
+        string $retryReason,
+        string $message,
+        int $status = 502,
+    ): void {
+        if ($this->requestTraceLogger === null) {
+            return;
+        }
+
+        $event = [
+            'request_id' => $requestId,
+            'transport' => 'websocket',
+            'phase' => $phase,
+            'session' => $sessionKey->primary,
+            'status' => $status,
+            'classification' => 'transport',
+            'recovery' => $recovery,
+            'retry_reason' => $retryReason,
+            'message' => $message,
+        ] + $this->sessionTraceContext($sessionKey);
+        if ($account instanceof CodexAccount) {
+            $event['account'] = $account->name();
+            if ($recovery === 'retry') {
+                $event['retry_account'] = $account->name();
+            }
+        }
+
+        try {
+            if ($recovery === 'terminal') {
+                $this->requestTraceLogger->error($event);
+                return;
+            }
+            $this->requestTraceLogger->event($event);
+        } catch (Throwable $throwable) {
+            $this->activeLogger->warning('Failed to write recovery trace', [
                 'request_id' => $requestId,
                 'error' => $throwable->getMessage(),
             ]);

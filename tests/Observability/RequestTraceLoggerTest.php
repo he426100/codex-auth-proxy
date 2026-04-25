@@ -140,6 +140,31 @@ final class RequestTraceLoggerTest extends TestCase
         ], $records[0]['context']['timings_ms']);
     }
 
+    public function testWritesTransportRecoveryFields(): void
+    {
+        [$path, $logger] = $this->traceLogger('trace-recovery');
+
+        $logger->event([
+            'request_id' => 'retry-1',
+            'transport' => 'websocket',
+            'phase' => 'websocket_retry',
+            'session' => 'session-a',
+            'account' => 'account-a',
+            'classification' => 'transport',
+            'recovery' => 'retry',
+            'retry_reason' => 'closed_before_first_payload',
+            'retry_account' => 'account-b',
+            'message' => 'stream disconnected before response.completed',
+        ]);
+
+        $records = $this->traceRecords($path);
+        self::assertCount(1, $records);
+        self::assertSame('websocket_retry', $records[0]['context']['phase']);
+        self::assertSame('retry', $records[0]['context']['recovery']);
+        self::assertSame('closed_before_first_payload', $records[0]['context']['retry_reason']);
+        self::assertSame('account-b', $records[0]['context']['retry_account']);
+    }
+
     /** @return array{0:string,1:RequestTraceLogger} */
     private function traceLogger(string $name): array
     {

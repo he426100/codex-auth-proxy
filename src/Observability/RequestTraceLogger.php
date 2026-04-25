@@ -61,6 +61,9 @@ final class RequestTraceLogger
             'bound_account_id',
             'bound_selection_source',
             'session_activity',
+            'recovery',
+            'retry_reason',
+            'retry_account',
         ] as $key) {
             if (array_key_exists($key, $event)) {
                 $payload[$key] = is_string($event[$key]) ? $this->redact($event[$key]) : $event[$key];

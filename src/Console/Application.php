@@ -13,6 +13,7 @@ use CodexAuthProxy\Console\Command\ExportCommand;
 use CodexAuthProxy\Console\Command\ImportCommand;
 use CodexAuthProxy\Console\Command\LoginCommand;
 use CodexAuthProxy\Console\Command\ServeCommand;
+use CodexAuthProxy\Console\Command\TraceCommand;
 use CodexAuthProxy\Logging\LoggerConfigLoader;
 use CodexAuthProxy\Logging\LoggerFactory;
 use CodexAuthProxy\OAuth\CallbackServer;
@@ -56,5 +57,6 @@ final class Application extends SymfonyApplication
         $this->add(new ConfigCommand($configLoader));
         $this->add(new ServeCommand($configLoader, $logger, $requestTraceLogger));
         $this->add(new LoginCommand($configLoader, $oauthClient, $callbackServer));
+        $this->add(new TraceCommand($configLoader, $loggerConfigLoader));
     }
 }

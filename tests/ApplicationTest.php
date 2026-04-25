@@ -1326,6 +1326,56 @@ final class ApplicationTest extends TestCase
         self::assertCount(1, glob($accountsDir . '/alpha.account.json.deleted.*') ?: []);
         self::assertStringContainsString('Archived account alpha', $tester->getDisplay());
     }
+
+    public function testTraceCommandSummarizesRecoverableDisconnects(): void
+    {
+        $home = $this->tempDir('cap-home');
+        $traceFile = $home . '/trace.jsonl';
+        $records = [
+            [
+                'message' => 'request_trace',
+                'context' => [
+                    'phase' => 'websocket_retry',
+                    'transport' => 'websocket',
+                    'recovery' => 'retry',
+                    'retry_reason' => 'closed_before_first_payload',
+                    'classification' => 'transport',
+                ],
+            ],
+            [
+                'message' => 'request_trace_error',
+                'context' => [
+                    'phase' => 'websocket_incomplete_terminal',
+                    'transport' => 'websocket',
+                    'classification' => 'transport',
+                    'message' => 'stream disconnected before response.completed',
+                ],
+            ],
+            [
+                'message' => 'request_trace_error',
+                'context' => [
+                    'phase' => 'upstream_response',
+                    'transport' => 'http',
+                    'classification' => 'lineage',
+                    'message' => 'previous_response_not_found',
+                ],
+            ],
+        ];
+        file_put_contents($traceFile, implode("\n", array_map(
+            static fn (array $record): string => json_encode($record, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+            $records,
+        )) . "\n");
+
+        $application = new Application($home);
+        $tester = new CommandTester($application->find('trace'));
+        $code = $tester->execute(['--file' => $traceFile]);
+
+        self::assertSame(0, $code);
+        self::assertStringContainsString('Total records: 3', $tester->getDisplay());
+        self::assertStringContainsString('WebSocket retries: 1', $tester->getDisplay());
+        self::assertStringContainsString('Stream disconnect terminals: 1', $tester->getDisplay());
+        self::assertStringContainsString('Lineage errors: 1', $tester->getDisplay());
+    }
 }
 
 final class FakeOAuthClient implements CodexOAuthClient
