@@ -54,6 +54,23 @@ final class AccountUsageRefresherTest extends TestCase
         self::assertSame(10.0, $usage?->primary?->usedPercent);
     }
 
+    public function testRefreshAllDoesNotClearCooldownForIncompleteUsageSnapshot(): void
+    {
+        $repository = new AccountRepository($this->tempDir('cap-usage-refresh-incomplete-accounts'));
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+        $repository->saveAccount($account);
+        $state = StateStore::memory();
+        $state->setCooldown('acct-alpha', 2_000, 'quota', 900);
+
+        $summary = (new AccountUsageRefresher(new RefresherIncompleteUsageClient()))->refreshAll($repository, $state, 1_000);
+
+        $usage = $state->accountUsage('acct-alpha');
+        self::assertSame(['success' => 0, 'failure' => 1, 'skipped' => 0], $summary);
+        self::assertSame(2_000, $state->cooldownUntil('acct-alpha'));
+        self::assertSame('quota', $state->cooldownReason('acct-alpha'));
+        self::assertSame('usage endpoint returned incomplete Codex rate limit snapshot', $usage?->error);
+    }
+
     public function testRefreshAllPersistsRefreshedTokensBeforeUsageFetch(): void
     {
         $repository = new AccountRepository($this->tempDir('cap-usage-refresh-token-accounts'));
@@ -103,5 +120,13 @@ final class RefresherFailingUsageClient implements UsageClient
     public function fetch(CodexAccount $account): AccountUsage
     {
         throw new RuntimeException('usage down');
+    }
+}
+
+final class RefresherIncompleteUsageClient implements UsageClient
+{
+    public function fetch(CodexAccount $account): AccountUsage
+    {
+        return new AccountUsage('plus', new RateLimitWindow(93.0, 300, 1_300), null);
     }
 }

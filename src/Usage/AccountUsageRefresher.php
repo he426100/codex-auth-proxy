@@ -37,6 +37,9 @@ final class AccountUsageRefresher
             try {
                 $account = $this->refreshAccountIfNeeded($repository, $account);
                 $usage = $this->usageClient->fetch($account);
+                if (!$usage->hasCompleteRateLimits()) {
+                    throw new \RuntimeException('usage endpoint returned incomplete Codex rate limit snapshot');
+                }
                 $state->setAccountUsage($account->accountId(), CachedAccountUsage::fromLive($usage, $checkedAt));
                 $state->setCooldownUntil($account->accountId(), 0);
                 $summary['success']++;

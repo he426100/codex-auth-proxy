@@ -14,6 +14,10 @@ final class CodexWebSocketSessionRegistry
 
     /** @var array<int,string> */
     private array $fdSessions = [];
+    /** @var array<int,array<string,string>> */
+    private array $turnStates = [];
+    /** @var array<int,int> */
+    private array $ephemeralTurnCounters = [];
 
     /** @var array<string,CodexWebSocketUpstreamSession> */
     private array $sessions = [];
@@ -26,6 +30,49 @@ final class CodexWebSocketSessionRegistry
     public function request(int $fd): ?Request
     {
         return $this->requests[$fd] ?? null;
+    }
+
+    public function beginTurn(int $fd, string $turnKey): void
+    {
+        $turnKey = trim($turnKey);
+        if ($fd <= 0 || $turnKey === '') {
+            return;
+        }
+
+        $existing = $this->turnStates[$fd][$turnKey] ?? null;
+        $this->turnStates[$fd] = [];
+        if ($existing !== null) {
+            $this->turnStates[$fd][$turnKey] = $existing;
+        }
+    }
+
+    public function rememberTurnState(int $fd, string $turnKey, ?string $turnState): void
+    {
+        $turnKey = trim($turnKey);
+        $turnState = is_string($turnState) ? trim($turnState) : '';
+        if ($fd <= 0 || $turnKey === '' || $turnState === '') {
+            return;
+        }
+
+        $this->turnStates[$fd][$turnKey] = $turnState;
+    }
+
+    public function turnState(int $fd, string $turnKey): ?string
+    {
+        $turnKey = trim($turnKey);
+        if ($fd <= 0 || $turnKey === '') {
+            return null;
+        }
+
+        return $this->turnStates[$fd][$turnKey] ?? null;
+    }
+
+    public function nextEphemeralTurnKey(int $fd): string
+    {
+        $next = ($this->ephemeralTurnCounters[$fd] ?? 0) + 1;
+        $this->ephemeralTurnCounters[$fd] = $next;
+
+        return 'ephemeral:' . $fd . ':' . $next;
     }
 
     public function bindSession(int $fd, SessionKey $sessionKey): CodexWebSocketUpstreamSession
@@ -88,23 +135,23 @@ final class CodexWebSocketSessionRegistry
         return $this->sessionById($sessionId)?->hasActiveRequest() ?? false;
     }
 
-    /** @return array{payload:string,opcode:int,sessionKey:SessionKey}|null */
+    /** @return array{payload:string,opcode:int,sessionKey:SessionKey,turnKey:string,turnMetadata:?string}|null */
     public function lastPayloadForSession(string $sessionId): ?array
     {
         return $this->sessionById($sessionId)?->lastPayload();
     }
 
-    public function rememberPayload(int $fd, SessionKey $sessionKey, string $payload, int $opcode): void
+    public function rememberPayload(int $fd, SessionKey $sessionKey, string $payload, int $opcode, string $turnKey, ?string $turnMetadata): void
     {
         $session = $this->sessionForFd($fd);
         if (!$session instanceof CodexWebSocketUpstreamSession) {
             $session = $this->bindSession($fd, $sessionKey);
         }
 
-        $session->rememberPayload($sessionKey, $payload, $opcode);
+        $session->rememberPayload($sessionKey, $payload, $opcode, $turnKey, $turnMetadata);
     }
 
-    /** @return array{payload:string,opcode:int,sessionKey:SessionKey}|null */
+    /** @return array{payload:string,opcode:int,sessionKey:SessionKey,turnKey:string,turnMetadata:?string}|null */
     public function lastPayload(int $fd): ?array
     {
         return $this->sessionForFd($fd)?->lastPayload();
@@ -183,6 +230,8 @@ final class CodexWebSocketSessionRegistry
     public function clear(int $fd): ?Client
     {
         unset($this->requests[$fd]);
+        unset($this->turnStates[$fd]);
+        unset($this->ephemeralTurnCounters[$fd]);
 
         $sessionId = $this->fdSessions[$fd] ?? null;
         unset($this->fdSessions[$fd]);
@@ -240,6 +289,8 @@ final class CodexWebSocketSessionRegistry
 
         $this->requests = [];
         $this->fdSessions = [];
+        $this->turnStates = [];
+        $this->ephemeralTurnCounters = [];
         $this->sessions = [];
 
         return $clients;

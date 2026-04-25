@@ -22,7 +22,7 @@ final class CodexWebSocketSessionRegistryTest extends TestCase
 
         $registry->rememberRequest(7, $request);
         $registry->bindSession(7, new SessionKey('msg:abc'));
-        $registry->rememberPayload(7, new SessionKey('msg:abc'), '{"type":"response.create"}', WEBSOCKET_OPCODE_TEXT);
+        $registry->rememberPayload(7, new SessionKey('msg:abc'), '{"type":"response.create"}', WEBSOCKET_OPCODE_TEXT, 'turn:1', null);
         $registry->attachUpstream(7, $client, $account);
         $registry->markRequestActive(7, true);
 
@@ -87,7 +87,7 @@ final class CodexWebSocketSessionRegistryTest extends TestCase
         $registry->bindSession(7, new SessionKey('turn:reuse'));
         $registry->bindSession(8, new SessionKey('turn:reuse'));
         $registry->attachUpstream(7, $client, $account);
-        $registry->rememberPayload(7, new SessionKey('turn:reuse'), '{"type":"response.create"}', WEBSOCKET_OPCODE_TEXT);
+        $registry->rememberPayload(7, new SessionKey('turn:reuse'), '{"type":"response.create"}', WEBSOCKET_OPCODE_TEXT, 'turn:reuse', null);
 
         self::assertSame($client, $registry->client(8));
         self::assertSame($account, $registry->account(8));

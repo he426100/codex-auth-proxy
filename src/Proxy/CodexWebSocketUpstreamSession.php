@@ -13,7 +13,7 @@ final class CodexWebSocketUpstreamSession
     private ?Channel $requestTurn = null;
     private ?Client $client = null;
     private ?CodexAccount $account = null;
-    /** @var array{payload:string,opcode:int,sessionKey:SessionKey}|null */
+    /** @var array{payload:string,opcode:int,sessionKey:SessionKey,turnKey:string,turnMetadata:?string}|null */
     private ?array $lastPayload = null;
     private ?int $activeFd = null;
     private float $lastTouchedAt;
@@ -39,17 +39,19 @@ final class CodexWebSocketUpstreamSession
         return $this->lastTouchedAt;
     }
 
-    public function rememberPayload(SessionKey $sessionKey, string $payload, int $opcode): void
+    public function rememberPayload(SessionKey $sessionKey, string $payload, int $opcode, string $turnKey, ?string $turnMetadata): void
     {
         $this->lastPayload = [
             'payload' => $payload,
             'opcode' => $opcode,
             'sessionKey' => $sessionKey,
+            'turnKey' => $turnKey,
+            'turnMetadata' => $turnMetadata,
         ];
         $this->touch();
     }
 
-    /** @return array{payload:string,opcode:int,sessionKey:SessionKey}|null */
+    /** @return array{payload:string,opcode:int,sessionKey:SessionKey,turnKey:string,turnMetadata:?string}|null */
     public function lastPayload(): ?array
     {
         return $this->lastPayload;

@@ -57,7 +57,7 @@ final class Scheduler
     {
         $snapshot = $this->candidateSnapshot();
         $boundAccountId = $this->state->sessionAccount($sessionKey);
-        if ($preferredAccountId !== null) {
+        if ($preferredAccountId !== null && ($boundAccountId === null || $this->canResponseAffinityOverrideBinding($sessionKey))) {
             $preferred = $this->accountsById[$preferredAccountId] ?? null;
             if ($preferred !== null && $this->isAvailableInSnapshot($snapshot, $preferred->accountId())) {
                 if ($boundAccountId === $preferred->accountId()) {
@@ -325,6 +325,11 @@ final class Scheduler
     private function isAvailableInSnapshot(array $snapshot, string $accountId): bool
     {
         return isset($snapshot['by_account_id'][$accountId]);
+    }
+
+    private function canResponseAffinityOverrideBinding(string $sessionKey): bool
+    {
+        return str_starts_with($sessionKey, 'previous_response_id:');
     }
 
     private function availability(CodexAccount $account): AccountAvailability

@@ -35,7 +35,7 @@ The feature should keep the default account overview fast and avoid calling Open
 
 `accounts --json` includes the same fields as structured data.
 
-`accounts refresh` refreshes all accounts by calling the existing Codex app-server usage reader for each account, then writes the results to local state.
+`accounts refresh` refreshes all accounts by calling the direct ChatGPT Codex usage endpoint for each account, then writes the results to local state.
 
 `accounts refresh <name>` refreshes one account.
 

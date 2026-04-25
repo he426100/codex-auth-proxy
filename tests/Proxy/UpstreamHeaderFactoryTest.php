@@ -79,4 +79,16 @@ final class UpstreamHeaderFactoryTest extends TestCase
         self::assertSame('parent-1', $headers['X-Codex-Parent-Thread-Id']);
         self::assertArrayNotHasKey('user-agent', $headers);
     }
+
+    public function testInjectsStoredTurnStateOnlyWhenDownstreamDoesNotProvideOne(): void
+    {
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+        $factory = new UpstreamHeaderFactory($this->runtimeProfile('codex-cli-test', 'multi_agent'));
+
+        $headers = $factory->build([], $account, 'chatgpt.com', true, turnState: 'ts-stored');
+        self::assertSame('ts-stored', $headers['X-Codex-Turn-State']);
+
+        $headers = $factory->build(['x-codex-turn-state' => 'ts-downstream'], $account, 'chatgpt.com', true, turnState: 'ts-stored');
+        self::assertSame('ts-downstream', $headers['X-Codex-Turn-State']);
+    }
 }

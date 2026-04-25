@@ -9,14 +9,20 @@ use CodexAuthProxy\Usage\CachedAccountUsage;
 
 final class StateStore
 {
+    private const MIN_SESSION_RETENTION_SECONDS = 86400;
     private const MAX_RESPONSE_AFFINITY_ENTRIES = 2048;
+    private const SESSION_RETENTION_MULTIPLIER = 4;
 
     private ?string $stateRevision = null;
     private string $candidateRevision = 'missing';
     private int $memoryRevision = 0;
 
     /** @param array<string,mixed> $state */
-    private function __construct(private array $state, private readonly ?string $path = null)
+    private function __construct(
+        private array $state,
+        private readonly ?string $path = null,
+        private readonly int $staleSessionRetentionSeconds = 0,
+    )
     {
         if ($this->path === null) {
             $this->stateRevision = 'memory:0';
@@ -46,23 +52,35 @@ final class StateStore
         ];
     }
 
-    public static function memory(): self
+    public static function memory(int $staleSessionRetentionSeconds = 0): self
     {
-        return new self(self::defaultState());
+        return new self(self::defaultState(), null, $staleSessionRetentionSeconds);
     }
 
     /** @param array<string,mixed> $state */
-    public static function fromArray(array $state): self
+    public static function fromArray(array $state, int $staleSessionRetentionSeconds = 0): self
     {
-        return new self(self::normalizeState($state));
+        return new self(self::normalizeState($state), null, $staleSessionRetentionSeconds);
     }
 
-    public static function file(string $path): self
+    public static function file(string $path, int $staleSessionRetentionSeconds = 0): self
     {
-        $store = new self(self::readState($path), $path);
+        $store = new self(self::readState($path), $path, $staleSessionRetentionSeconds);
         $store->stateRevision = self::stateRevision($path);
 
         return $store;
+    }
+
+    public static function sessionRetentionSeconds(int $activeSessionWindowSeconds): int
+    {
+        if ($activeSessionWindowSeconds <= 0) {
+            return 0;
+        }
+
+        return max(
+            self::MIN_SESSION_RETENTION_SECONDS,
+            $activeSessionWindowSeconds * self::SESSION_RETENTION_MULTIPLIER,
+        );
     }
 
     /** @return array{accounts: array<string,mixed>, sessions: array<string,mixed>, session_meta: array<string,mixed>, responses: array<string,mixed>, cursor: int, usage: array<string,mixed>} */
@@ -129,6 +147,23 @@ final class StateStore
         });
     }
 
+    public function forgetSession(string $sessionKey): bool
+    {
+        $forgotten = false;
+        $this->update(function (array &$state) use ($sessionKey, &$forgotten): void {
+            if ($sessionKey === '') {
+                return;
+            }
+
+            if (isset($state['sessions'][$sessionKey]) || isset($state['session_meta'][$sessionKey])) {
+                unset($state['sessions'][$sessionKey], $state['session_meta'][$sessionKey]);
+                $forgotten = true;
+            }
+        });
+
+        return $forgotten;
+    }
+
     public function responseAccount(string $responseId): ?string
     {
         $this->reload();
@@ -153,6 +188,29 @@ final class StateStore
                 $state['responses'] = array_slice($state['responses'], -self::MAX_RESPONSE_AFFINITY_ENTRIES, null, true);
             }
         });
+    }
+
+    public function forgetResponseAccount(string $responseId, ?string $expectedAccountId = null): bool
+    {
+        $forgotten = false;
+        $this->update(function (array &$state) use ($responseId, $expectedAccountId, &$forgotten): void {
+            if ($responseId === '' || !isset($state['responses']) || !is_array($state['responses'])) {
+                return;
+            }
+
+            $currentAccountId = $this->responseAccountValue($state['responses'][$responseId] ?? null);
+            if ($currentAccountId === null) {
+                return;
+            }
+            if ($expectedAccountId !== null && $currentAccountId !== $expectedAccountId) {
+                return;
+            }
+
+            unset($state['responses'][$responseId]);
+            $forgotten = true;
+        });
+
+        return $forgotten;
     }
 
     /** @return array<string,string> */
@@ -473,7 +531,12 @@ final class StateStore
     private function update(callable $mutator): void
     {
         if ($this->path === null) {
+            $previous = $this->state;
             $mutator($this->state);
+            $this->pruneStaleSessions($this->state);
+            if ($this->state === $previous) {
+                return;
+            }
             $this->memoryRevision++;
             $this->stateRevision = 'memory:' . $this->memoryRevision;
             $this->refreshCandidateRevision();
@@ -497,7 +560,12 @@ final class StateStore
             $this->state = self::readState($this->path);
             $this->stateRevision = self::stateRevision($this->path);
             $this->refreshCandidateRevision();
+            $previous = $this->state;
             $mutator($this->state);
+            $this->pruneStaleSessions($this->state);
+            if ($this->state === $previous) {
+                return;
+            }
             $this->writeState();
         } finally {
             if ($locked) {
@@ -538,6 +606,51 @@ final class StateStore
         chmod($this->path, 0600);
         $this->stateRevision = self::stateRevision($this->path);
         $this->refreshCandidateRevision();
+    }
+
+    /** @param array<string,mixed> $state */
+    private function pruneStaleSessions(array &$state): void
+    {
+        if ($this->staleSessionRetentionSeconds <= 0) {
+            return;
+        }
+
+        if (!isset($state['sessions']) || !is_array($state['sessions'])) {
+            $state['sessions'] = [];
+        }
+        if (!isset($state['session_meta']) || !is_array($state['session_meta'])) {
+            $state['session_meta'] = [];
+        }
+
+        $cutoff = time() - $this->staleSessionRetentionSeconds;
+        foreach ($state['sessions'] as $sessionKey => $binding) {
+            if (!is_string($sessionKey) || $sessionKey === '') {
+                unset($state['sessions'][$sessionKey], $state['session_meta'][$sessionKey]);
+                continue;
+            }
+
+            $lastActivityAt = $this->sessionRetentionTimestamp($binding, $state['session_meta'][$sessionKey] ?? null);
+            if ($lastActivityAt === null || $lastActivityAt >= $cutoff) {
+                continue;
+            }
+
+            unset($state['sessions'][$sessionKey], $state['session_meta'][$sessionKey]);
+        }
+
+        foreach (array_keys($state['session_meta']) as $sessionKey) {
+            if (!is_string($sessionKey) || $sessionKey === '' || !array_key_exists($sessionKey, $state['sessions'])) {
+                unset($state['session_meta'][$sessionKey]);
+            }
+        }
+    }
+
+    private function sessionRetentionTimestamp(mixed $binding, mixed $meta): ?int
+    {
+        $bindingArray = is_array($binding) ? $binding : null;
+        $metaArray = is_array($meta) ? $meta : null;
+
+        return $this->lastSeenAtValue($metaArray['last_seen_at'] ?? $bindingArray['last_seen_at'] ?? null)
+            ?? $this->boundAtValue($metaArray['bound_at'] ?? $bindingArray['bound_at'] ?? null);
     }
 
     private function refreshCandidateRevision(): void

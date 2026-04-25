@@ -34,6 +34,9 @@ final class CodexProxyServer
 {
     private readonly LoggerInterface $activeLogger;
     private readonly TokenRefresher $activeTokenRefresher;
+    private ?string $schedulerAccountsRevision = null;
+    /** @var array<int,true> */
+    private array $closingWebSocketFds = [];
 
     public function __construct(
         private readonly string $host,
@@ -66,7 +69,8 @@ final class CodexProxyServer
 
         $repository = new AccountRepository($this->accountsDir);
         $accounts = $repository->load();
-        $scheduler = new Scheduler($accounts, StateStore::file($this->stateFile));
+        $this->schedulerAccountsRevision = $repository->revision();
+        $scheduler = new Scheduler($accounts, $this->stateStore());
         $classifier = new ErrorClassifier($this->defaultCooldownSeconds);
         $extractor = new SessionKeyExtractor();
         $headers = new UpstreamHeaderFactory($this->runtimeProfile);
@@ -115,9 +119,15 @@ final class CodexProxyServer
         return [
             'worker_num' => 1,
             'enable_coroutine' => true,
+            'hook_flags' => $this->coroutineHookFlags(),
             'http_compression' => false,
             'websocket_compression' => false,
         ];
+    }
+
+    private function coroutineHookFlags(): int
+    {
+        return defined('SWOOLE_HOOK_ALL') ? (int) constant('SWOOLE_HOOK_ALL') : 0;
     }
 
     private function registerServerCallbacks(
@@ -148,7 +158,8 @@ final class CodexProxyServer
             $this->handleWebSocketMessage($server, $frame, $sessionRegistry, $scheduler, $classifier, $repository, $extractor, $headers, $normalizer, $retryTracker);
         });
 
-        $server->on('close', static function (Server $server, int $fd) use ($sessionRegistry, $retryTracker): void {
+        $server->on('close', function (Server $server, int $fd) use ($sessionRegistry, $retryTracker): void {
+            $this->clearWebSocketClosing($fd);
             $retryTracker->clear($fd);
             $sessionRegistry->clear($fd)?->close();
         });
@@ -204,7 +215,7 @@ final class CodexProxyServer
             return;
         }
 
-        $state = StateStore::file($this->stateFile);
+        $state = $this->stateStore();
         $policy = new UsageRefreshPolicy($this->usageRefreshIntervalSeconds);
         $running = false;
         $consecutiveFailures = 0;
@@ -312,7 +323,6 @@ final class CodexProxyServer
         try {
             $preferredAccountId = $this->preferredAccountIdForPayload($body);
             $selectionContext = $this->selectionTraceContextForPayload($body, $preferredAccountId);
-            $lineageAttemptedAccountIds = [];
             $accountPrepareStartedAt = microtime(true);
             $selectionTimings = [];
             $selection = [];
@@ -334,26 +344,8 @@ final class CodexProxyServer
                 $classification = $classifier->classifyHttpResponse($result['status'], $result['body'], $result['headers']);
 
                 if ($classification->type() === 'lineage') {
-                    $lineageAttemptedAccountIds[$account->accountId()] = true;
-                    $this->traceUpstreamError($requestId, 'http', 'lineage_switch', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
-                    try {
-                        $accountPrepareStartedAt = microtime(true);
-                        $selectionTimings = [];
-                        $selection = [];
-                        $account = $this->freshAccount(
-                            $this->switchAfterSoftFailureWithRecovery($sessionKey, array_keys($lineageAttemptedAccountIds), 'lineage_switch', $scheduler, $repository, $selectionTimings, $selection),
-                            $repository,
-                            $scheduler,
-                        );
-                        $timings['scheduler_reload'] += (float) ($selectionTimings['scheduler_reload'] ?? 0.0);
-                        $timings['account_prepare'] += $this->elapsedMs($accountPrepareStartedAt);
-                        $this->traceAccountSelection($requestId, 'http', $sessionKey, $selection, $selectionContext);
-                        continue;
-                    } catch (RuntimeException $exception) {
-                        if (!$this->isNoAvailableAccount($exception)) {
-                            throw $exception;
-                        }
-                    }
+                    $this->traceUpstreamError($requestId, 'http', 'lineage_terminal', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
+                    $this->forgetRejectedResponseAffinityFromPayload($body, $account);
                 }
 
                 if (!$classification->hardSwitch()) {
@@ -439,6 +431,10 @@ final class CodexProxyServer
         WebSocketRetryTracker $retryTracker,
     ): void {
         $fd = (int) $frame->fd;
+        if ($this->isWebSocketClosing($fd)) {
+            return;
+        }
+
         $request = $sessionRegistry->request($fd);
         if ($request === null) {
             $this->pushWebSocketError($server, $fd, 400, 'Missing WebSocket handshake request');
@@ -459,6 +455,7 @@ final class CodexProxyServer
         $payload = $normalizedPayload->payload();
         $preferredAccountId = $this->preferredAccountIdForPayload($payload);
         $selectionContext = $this->selectionTraceContextForPayload($payload, $preferredAccountId);
+        $turnContext = $this->webSocketTurnContext($request, $payload, $sessionRegistry->nextEphemeralTurnKey($fd));
         if ($client instanceof Client && $account instanceof CodexAccount && $preferredAccountId !== null && $preferredAccountId !== $account->accountId()) {
             $sessionRegistry->detachUpstreamFromSession($sessionId, $client);
             $client->close();
@@ -468,9 +465,10 @@ final class CodexProxyServer
         if (!$sessionRegistry->waitForRequestTurn($fd)) {
             return;
         }
+        $sessionRegistry->beginTurn($fd, $turnContext['key']);
         $this->tracePayloadMutations($requestId, 'websocket', $sessionKey, $normalizedPayload->mutations());
         $retryTracker->beginPayload($fd, $payload);
-        $sessionRegistry->rememberPayload($fd, $sessionKey, $payload, (int) $frame->opcode);
+        $sessionRegistry->rememberPayload($fd, $sessionKey, $payload, (int) $frame->opcode, $turnContext['key'], $turnContext['metadata']);
         $sessionRegistry->markRequestActive($fd, true);
         if ($client === null || !$account instanceof CodexAccount) {
             $account = null;
@@ -504,9 +502,13 @@ final class CodexProxyServer
                     $repository,
                     $requestId,
                     $authRefreshAttempts,
+                    $selectionContext,
+                    $sessionRegistry->turnState($fd, $turnContext['key']),
+                    $turnContext['metadata'],
                 );
                 $timings['upstream_upgrade'] = $this->elapsedMs($upgradeStartedAt);
 
+                $this->rememberWebSocketTurnState($sessionRegistry, $fd, $turnContext['key'], $client);
                 $sessionRegistry->attachUpstream($fd, $client, $account);
                 $this->traceRequestTiming(
                     $requestId,
@@ -559,6 +561,8 @@ final class CodexProxyServer
                             $scheduler,
                             $repository,
                             $requestId,
+                            $sessionRegistry->turnState($fd, $turnContext['key']),
+                            $turnContext['metadata'],
                         );
                     } catch (Throwable $fallbackThrowable) {
                         $this->activeLogger->warning('WebSocket HTTP/SSE fallback failed', [
@@ -609,8 +613,12 @@ final class CodexProxyServer
                 $repository,
                 $requestId,
                 $authRefreshAttempts,
+                $selectionContext,
+                $sessionRegistry->turnState($fd, $turnContext['key']),
+                $turnContext['metadata'],
             );
             $client->close();
+            $this->rememberWebSocketTurnState($sessionRegistry, $fd, $turnContext['key'], $replacementClient);
             $sessionRegistry->attachUpstream($fd, $replacementClient, $account);
             $this->startUpstreamWebSocketReader($server, $sessionId, $replacementClient, $sessionRegistry, $scheduler, $classifier, $repository, $headers, $retryTracker);
             if ($this->pushUpstreamWebSocketPayload($replacementClient, $payload, (int) $frame->opcode)) {
@@ -740,30 +748,19 @@ final class CodexProxyServer
         Scheduler $scheduler,
         AccountRepository $repository,
         string $requestId,
+        ?string $turnState = null,
+        ?string $turnMetadata = null,
     ): void {
         $authRefreshAttempts = [];
-        $lineageAttemptedAccountIds = [];
         $selectionContext = $this->selectionTraceContextForPayload($body, $this->preferredAccountIdForPayload($body));
         while (true) {
-            $result = $this->forwardWebSocketHttpAttempt($server, $fd, $request, $account, $body, $headers);
+            $result = $this->forwardWebSocketHttpAttempt($server, $fd, $request, $account, $body, $headers, $turnState, $turnMetadata);
             $classification = $classifier->classifyHttpResponse($result['status'], $result['body'], $result['headers']);
             if ($classification->type() === 'lineage' && !$result['forwarded']) {
-                $lineageAttemptedAccountIds[$account->accountId()] = true;
-                $this->traceUpstreamError($requestId, 'websocket', 'http_fallback_lineage_switch', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
-                try {
-                    $selection = [];
-                    $account = $this->freshAccount(
-                        $this->switchAfterSoftFailureWithRecovery($sessionKey, array_keys($lineageAttemptedAccountIds), 'lineage_switch', $scheduler, $repository, selection: $selection),
-                        $repository,
-                        $scheduler,
-                    );
-                    $this->traceAccountSelection($requestId, 'websocket', $sessionKey, $selection, $selectionContext);
-                    continue;
-                } catch (RuntimeException $exception) {
-                    if (!$this->isNoAvailableAccount($exception)) {
-                        throw $exception;
-                    }
-                }
+                $this->traceUpstreamError($requestId, 'websocket', 'http_fallback_lineage_terminal', $sessionKey, $account, $result['status'], $result['body'], $classification->type());
+                $this->forgetRejectedResponseAffinityFromPayload($body, $account);
+                $this->pushBufferedErrorAsWebSocket($server, $fd, $result['body'], true);
+                return;
             }
             if (!$classification->hardSwitch() || $result['forwarded']) {
                 if (!$result['forwarded'] && $this->pushBufferedErrorAsWebSocket($server, $fd, $result['body'])) {
@@ -795,7 +792,7 @@ final class CodexProxyServer
     }
 
     /** @return array{status:int,body:string,headers:array<string,string>,forwarded:bool,completed:bool} */
-    private function forwardWebSocketHttpAttempt(Server $server, int $fd, Request $request, CodexAccount $account, string $body, UpstreamHeaderFactory $headers): array
+    private function forwardWebSocketHttpAttempt(Server $server, int $fd, Request $request, CodexAccount $account, string $body, UpstreamHeaderFactory $headers, ?string $turnState = null, ?string $turnMetadata = null): array
     {
         $target = new UpstreamTarget($this->upstreamBase);
         [$host, $port, $ssl] = $target->endpoint();
@@ -823,7 +820,7 @@ final class CodexProxyServer
             },
         ]));
         $requestUri = $this->requestTarget($request, '/v1/responses');
-        $client->setHeaders($headers->build($request->header ?? [], $account, $host, false, 'text/event-stream'));
+        $client->setHeaders($headers->build($request->header ?? [], $account, $host, false, 'text/event-stream', $turnState, $turnMetadata));
         $client->setMethod('POST');
         if ($body !== '') {
             $client->setData($body);
@@ -885,16 +882,42 @@ final class CodexProxyServer
         ];
     }
 
-    private function pushBufferedErrorAsWebSocket(Server $server, int $fd, string $body): bool
+    private function pushBufferedErrorAsWebSocket(Server $server, int $fd, string $body, bool $asResponseFailed = false): bool
     {
         $payload = StreamErrorDetector::jsonErrorBody($body);
         if ($payload === null || !$server->isEstablished($fd)) {
             return false;
         }
 
+        if ($asResponseFailed) {
+            $payload = $this->responseFailedPayloadFromErrorBody($payload);
+        }
+
         $server->push($fd, $payload, \WEBSOCKET_OPCODE_TEXT);
 
         return true;
+    }
+
+    private function responseFailedPayloadFromErrorBody(string $errorBody): string
+    {
+        $decoded = json_decode($errorBody, true);
+        $error = is_array($decoded) && is_array($decoded['error'] ?? null) ? $decoded['error'] : [];
+        $code = is_string($error['code'] ?? null) && trim($error['code']) !== ''
+            ? trim($error['code'])
+            : 'previous_response_not_found';
+        $message = is_string($error['message'] ?? null) && trim($error['message']) !== ''
+            ? trim($error['message'])
+            : 'Previous response was not found.';
+
+        return json_encode([
+            'type' => 'response.failed',
+            'response' => [
+                'error' => [
+                    'code' => $code,
+                    'message' => $message,
+                ],
+            ],
+        ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
     }
 
     /** @return array{forwarded:bool,completed:bool,error:bool} */
@@ -1012,13 +1035,13 @@ final class CodexProxyServer
         return 'stream disconnected before response.completed';
     }
 
-    private function openUpstreamWebSocket(Request $request, CodexAccount $account, UpstreamHeaderFactory $headers): Client
+    private function openUpstreamWebSocket(Request $request, CodexAccount $account, UpstreamHeaderFactory $headers, ?string $turnState = null, ?string $turnMetadata = null): Client
     {
         $target = new UpstreamTarget($this->upstreamBase);
         [$host, $port, $ssl] = $target->endpoint();
         $client = new Client($host, $port, $ssl);
         $client->set($this->clientOptionsFor($host, ['timeout' => -1]));
-        $client->setHeaders($headers->build($request->header ?? [], $account, $host, true));
+        $client->setHeaders($headers->build($request->header ?? [], $account, $host, true, turnState: $turnState, turnMetadata: $turnMetadata));
         $path = $target->pathFor($this->requestTarget($request, '/v1/responses'));
         if (!$client->upgrade($path) || (int) $client->statusCode !== 101) {
             $body = is_string($client->body ?? null) ? $client->body : '';
@@ -1031,6 +1054,93 @@ final class CodexProxyServer
         }
 
         return $client;
+    }
+
+    private function rememberWebSocketTurnState(CodexWebSocketSessionRegistry $sessionRegistry, int $fd, string $turnKey, Client $client): void
+    {
+        $sessionRegistry->rememberTurnState($fd, $turnKey, $this->turnStateFromHeaders($client->headers ?? []));
+    }
+
+    /** @param array<string,mixed> $headers */
+    private function turnStateFromHeaders(array $headers): ?string
+    {
+        foreach ($headers as $name => $value) {
+            if (strtolower((string) $name) !== 'x-codex-turn-state') {
+                continue;
+            }
+
+            $headerValue = is_array($value) ? implode(', ', $value) : (string) $value;
+            $headerValue = trim($headerValue);
+
+            return $headerValue === '' ? null : $headerValue;
+        }
+
+        return null;
+    }
+
+    /** @return array{key:string,metadata:?string} */
+    private function webSocketTurnContext(Request $request, string $payload, ?string $fallbackKey = null): array
+    {
+        $metadata = $this->turnMetadataFromPayload($payload)
+            ?? $this->headerValue($request->header ?? [], 'x-codex-turn-metadata');
+        $turnKey = $this->turnKeyFromMetadata($metadata);
+        if ($turnKey !== null) {
+            return ['key' => $turnKey, 'metadata' => $metadata];
+        }
+
+        return ['key' => $fallbackKey ?? 'payload:' . sha1($payload), 'metadata' => null];
+    }
+
+    private function turnMetadataFromPayload(string $payload): ?string
+    {
+        $decoded = json_decode($payload, true);
+        if (!is_array($decoded) || !is_array($decoded['client_metadata'] ?? null)) {
+            return null;
+        }
+
+        foreach ($decoded['client_metadata'] as $key => $value) {
+            if (strtolower((string) $key) !== 'x-codex-turn-metadata' || !is_string($value)) {
+                continue;
+            }
+
+            $value = trim($value);
+
+            return $value === '' ? null : $value;
+        }
+
+        return null;
+    }
+
+    private function turnKeyFromMetadata(?string $metadata): ?string
+    {
+        $metadata = is_string($metadata) ? trim($metadata) : '';
+        if ($metadata === '') {
+            return null;
+        }
+
+        $decoded = json_decode($metadata, true);
+        if (is_array($decoded) && is_string($decoded['turn_id'] ?? null) && trim($decoded['turn_id']) !== '') {
+            return 'turn_id:' . trim($decoded['turn_id']);
+        }
+
+        return 'turn_metadata:' . sha1($metadata);
+    }
+
+    /** @param array<string,mixed> $headers */
+    private function headerValue(array $headers, string $name): ?string
+    {
+        foreach ($headers as $key => $value) {
+            if (strtolower((string) $key) !== strtolower($name)) {
+                continue;
+            }
+
+            $headerValue = is_array($value) ? implode(', ', $value) : (string) $value;
+            $headerValue = trim($headerValue);
+
+            return $headerValue === '' ? null : $headerValue;
+        }
+
+        return null;
     }
 
     /**
@@ -1047,10 +1157,13 @@ final class CodexProxyServer
         AccountRepository $repository,
         string $requestId,
         array &$authRefreshAttempts,
+        array $selectionContext = [],
+        ?string $turnState = null,
+        ?string $turnMetadata = null,
     ): array {
         while (true) {
             try {
-                return [$this->openUpstreamWebSocket($request, $account, $headers), $account];
+                return [$this->openUpstreamWebSocket($request, $account, $headers, $turnState, $turnMetadata), $account];
             } catch (Throwable $throwable) {
                 $refreshed = $this->refreshAccountAfterWebSocketUpgradeFailure($throwable, $classifier, $account, $repository, $scheduler, $authRefreshAttempts);
                 if ($refreshed !== null) {
@@ -1087,7 +1200,7 @@ final class CodexProxyServer
                     $repository,
                     $scheduler,
                 );
-                $this->traceAccountSelection($requestId, 'websocket', $sessionKey, $selection);
+                $this->traceAccountSelection($requestId, 'websocket', $sessionKey, $selection, $selectionContext);
             }
         }
     }
@@ -1165,63 +1278,23 @@ final class CodexProxyServer
                     $sessionKey = $lastPayload['sessionKey'] ?? new SessionKey('global', null);
                     $requestId = $this->requestIdFactory->fromHeaders($request->header ?? []);
                     $classification = $this->traceWebSocketStreamError($requestId, $sessionKey, $account, $errorBody, $classifier);
-                    if ($classification->type() === 'lineage' && $lastPayload !== null && $retryTracker->claimRetry($fd, $lastPayload['payload'], $account->accountId(), $forwardedData)) {
-                        try {
-                            $selectionContext = $this->selectionTraceContextForPayload($lastPayload['payload'], $this->preferredAccountIdForPayload($lastPayload['payload']));
-                            $selection = [];
-                            $replacement = $this->freshAccount(
-                                $this->switchAfterSoftFailureWithRecovery($lastPayload['sessionKey'], $retryTracker->attemptedAccounts($fd, $lastPayload['payload']), 'lineage_switch', $scheduler, $repository, selection: $selection),
-                                $repository,
-                                $scheduler,
-                            );
-                            $this->traceAccountSelection($requestId, 'websocket', $lastPayload['sessionKey'], $selection, $selectionContext);
-                            $authRefreshAttempts = [];
-                            [$replacementClient, $replacement] = $this->openUpstreamWebSocketWithRecovery(
-                                $request,
-                                $replacement,
-                                $headers,
-                                $classifier,
-                                $lastPayload['sessionKey'],
-                                $scheduler,
-                                $repository,
-                                $requestId,
-                                $authRefreshAttempts,
-                            );
-                            $sessionRegistry->attachUpstreamToSession($sessionId, $replacementClient, $replacement);
-                            $this->startUpstreamWebSocketReader($server, $sessionId, $replacementClient, $sessionRegistry, $scheduler, $classifier, $repository, $headers, $retryTracker);
-                            if (!$this->pushUpstreamWebSocketPayload($replacementClient, $lastPayload['payload'], $lastPayload['opcode'])) {
-                                $sessionRegistry->detachUpstreamFromSession($sessionId, $replacementClient);
-                                $replacementClient->close();
-                                $sessionRegistry->markRequestActive($fd, false);
-                                $sessionRegistry->releaseRequestTurn($fd);
-                                $this->pushWebSocketError($server, $fd, 502, $this->upstreamClientError('WebSocket send', $replacementClient));
-                                $terminalErrorSent = true;
-                                break;
-                            }
-                            $replacedClient = true;
-                            break;
-                        } catch (RuntimeException $exception) {
-                            if (!$this->isNoAvailableAccount($exception)) {
-                                $sessionRegistry->markRequestActive($fd, false);
-                                $sessionRegistry->releaseRequestTurn($fd);
-                                $this->pushWebSocketError($server, $fd, 502, $exception->getMessage());
-                                $terminalErrorSent = true;
-                                break;
-                            }
-                        } catch (Throwable $throwable) {
-                            $this->activeLogger->warning('Replacement WebSocket failed', ['error' => $throwable->getMessage()]);
-                            $sessionRegistry->markRequestActive($fd, false);
-                            $sessionRegistry->releaseRequestTurn($fd);
-                            $this->pushWebSocketError($server, $fd, 502, $throwable->getMessage());
-                            $terminalErrorSent = true;
-                            break;
-                        }
+                    if ($classification->type() === 'lineage' && $lastPayload !== null) {
+                        $this->forgetRejectedResponseAffinityFromPayload($lastPayload['payload'], $account);
                     }
-                    if ($classification->hardSwitch()) {
+                    if ($classification->type() === 'lineage') {
+                        $data = $this->responseFailedPayloadFromErrorBody($errorBody);
+                        $sessionRegistry->markRequestActive($fd, false);
+                        $sessionRegistry->releaseRequestTurn($fd);
+                        $terminalErrorSent = true;
+                    } elseif ($classification->hardSwitch()) {
                         $cooldownSeconds = max(1, $classification->cooldownUntil() - time());
                         if ($lastPayload !== null && $retryTracker->claimRetry($fd, $lastPayload['payload'], $account->accountId(), $forwardedData)) {
                             $replacement = null;
                             try {
+                                $turnContext = [
+                                    'key' => $lastPayload['turnKey'],
+                                    'metadata' => $lastPayload['turnMetadata'],
+                                ];
                                 $selectionContext = $this->selectionTraceContextForPayload($lastPayload['payload'], $this->preferredAccountIdForPayload($lastPayload['payload']));
                                 $selection = [];
                                 $replacement = $this->freshAccount(
@@ -1241,7 +1314,11 @@ final class CodexProxyServer
                                     $repository,
                                     $requestId,
                                     $authRefreshAttempts,
+                                    $selectionContext,
+                                    $sessionRegistry->turnState($fd, $turnContext['key']),
+                                    $turnContext['metadata'],
                                 );
+                                $this->rememberWebSocketTurnState($sessionRegistry, $fd, $turnContext['key'], $replacementClient);
                                 $sessionRegistry->attachUpstreamToSession($sessionId, $replacementClient, $replacement);
                                 $this->startUpstreamWebSocketReader($server, $sessionId, $replacementClient, $sessionRegistry, $scheduler, $classifier, $repository, $headers, $retryTracker);
                                 if (!$this->pushUpstreamWebSocketPayload($replacementClient, $lastPayload['payload'], $lastPayload['opcode'])) {
@@ -1278,7 +1355,10 @@ final class CodexProxyServer
                                 $selection = [];
                                 $this->switchAfterHardFailureWithRecovery($sessionKey, $cooldownSeconds, $classification->type(), $scheduler, $repository, selection: $selection);
                                 $requestId = $this->requestIdFactory->fromHeaders($request->header ?? []);
-                                $this->traceAccountSelection($requestId, 'websocket', $sessionKey, $selection);
+                                $selectionContext = $lastPayload !== null
+                                    ? $this->selectionTraceContextForPayload($lastPayload['payload'], $this->preferredAccountIdForPayload($lastPayload['payload']))
+                                    : [];
+                                $this->traceAccountSelection($requestId, 'websocket', $sessionKey, $selection, $selectionContext);
                             } catch (Throwable $throwable) {
                                 $this->activeLogger->warning('Failed to switch Codex account after WebSocket stream error', ['error' => $throwable->getMessage()]);
                             }
@@ -1293,6 +1373,10 @@ final class CodexProxyServer
                 if ($server->isEstablished($fd)) {
                     $server->push($fd, $data, $opcode);
                     $forwardedData = true;
+                }
+
+                if ($terminalErrorSent) {
+                    break;
                 }
 
                 if ($completedSeen) {
@@ -1334,6 +1418,10 @@ final class CodexProxyServer
             if (!$forwardedData) {
                 $lastPayload = $sessionRegistry->lastPayloadForSession($sessionId);
                 if ($lastPayload !== null && $retryTracker->claimRetry($fd, $lastPayload['payload'], $account->accountId(), false)) {
+                    $turnContext = [
+                        'key' => $lastPayload['turnKey'],
+                        'metadata' => $lastPayload['turnMetadata'],
+                    ];
                     $requestId = $this->requestIdFactory->fromHeaders($request->header ?? []);
                     $this->activeLogger->warning('Retrying WebSocket request after upstream closed before first payload', [
                         'request_id' => $requestId,
@@ -1352,7 +1440,11 @@ final class CodexProxyServer
                             $repository,
                             $requestId,
                             $authRefreshAttempts,
+                            $this->selectionTraceContextForPayload($lastPayload['payload'], $this->preferredAccountIdForPayload($lastPayload['payload'])),
+                            $sessionRegistry->turnState($fd, $turnContext['key']),
+                            $turnContext['metadata'],
                         );
+                        $this->rememberWebSocketTurnState($sessionRegistry, $fd, $turnContext['key'], $replacementClient);
                         $sessionRegistry->attachUpstreamToSession($sessionId, $replacementClient, $replacement);
                         $this->startUpstreamWebSocketReader($server, $sessionId, $replacementClient, $sessionRegistry, $scheduler, $classifier, $repository, $headers, $retryTracker);
                         if ($this->pushUpstreamWebSocketPayload($replacementClient, $lastPayload['payload'], $lastPayload['opcode'])) {
@@ -1568,6 +1660,7 @@ final class CodexProxyServer
     ): CodexAccount {
         $repository->saveAccount($account);
         $scheduler->replaceAccount($account);
+        $this->schedulerAccountsRevision = $repository->revision();
         $this->activeLogger->info($message, ['account' => $account->name()]);
 
         return $account;
@@ -1620,35 +1713,9 @@ final class CodexProxyServer
         }
     }
 
-    /**
-     * @param list<string> $excludeAccountIds
-     * @param array<string,float> $timings
-     */
-    private function switchAfterSoftFailureWithRecovery(
-        SessionKey $sessionKey,
-        array $excludeAccountIds,
-        string $source,
-        Scheduler $scheduler,
-        AccountRepository $repository,
-        array &$timings = [],
-        array &$selection = [],
-    ): CodexAccount {
-        $timings['scheduler_reload'] = ($timings['scheduler_reload'] ?? 0.0) + $this->syncSchedulerAccounts($repository, $scheduler);
-
-        try {
-            return $scheduler->switchAfterSoftFailure($sessionKey->primary, $excludeAccountIds, $source, $selection);
-        } catch (RuntimeException $exception) {
-            if (!$this->isNoAvailableAccount($exception) || !$this->recoverAuthCooldownAccounts($repository, $scheduler)) {
-                throw $exception;
-            }
-
-            return $scheduler->switchAfterSoftFailure($sessionKey->primary, $excludeAccountIds, $source, $selection);
-        }
-    }
-
     private function recoverAuthCooldownAccounts(AccountRepository $repository, Scheduler $scheduler): bool
     {
-        $state = StateStore::file($this->stateFile);
+        $state = $this->stateStore();
         $now = time();
         $recovered = false;
 
@@ -1685,7 +1752,11 @@ final class CodexProxyServer
     {
         $startedAt = microtime(true);
         try {
-            $scheduler->replaceAccounts($repository->load());
+            $revision = $repository->revision();
+            if ($revision !== $this->schedulerAccountsRevision) {
+                $scheduler->replaceAccounts($repository->load());
+                $this->schedulerAccountsRevision = $revision;
+            }
         } catch (Throwable $throwable) {
             $this->activeLogger->warning('Failed to reload Codex accounts from disk', [
                 'error' => $throwable->getMessage(),
@@ -1697,6 +1768,7 @@ final class CodexProxyServer
 
     private function pushWebSocketError(Server $server, int $fd, int $status, string $message): void
     {
+        $this->markWebSocketClosing($fd);
         if ($server->isEstablished($fd)) {
             $server->push($fd, json_encode([
                 'type' => 'error',
@@ -1712,6 +1784,23 @@ final class CodexProxyServer
                 }
             });
         }
+    }
+
+    private function markWebSocketClosing(int $fd): void
+    {
+        if ($fd > 0) {
+            $this->closingWebSocketFds[$fd] = true;
+        }
+    }
+
+    private function isWebSocketClosing(int $fd): bool
+    {
+        return ($this->closingWebSocketFds[$fd] ?? false) === true;
+    }
+
+    private function clearWebSocketClosing(int $fd): void
+    {
+        unset($this->closingWebSocketFds[$fd]);
     }
 
     private function traceUpstreamError(
@@ -1849,7 +1938,15 @@ final class CodexProxyServer
             return null;
         }
 
-        return StateStore::file($this->stateFile)->responseAccount($previousResponseId);
+        return $this->stateStore()->responseAccount($previousResponseId);
+    }
+
+    private function stateStore(): StateStore
+    {
+        return StateStore::file(
+            $this->stateFile,
+            StateStore::sessionRetentionSeconds($this->activeSessionWindowSeconds),
+        );
     }
 
     /** @return array<string,mixed> */
@@ -1878,7 +1975,7 @@ final class CodexProxyServer
             return;
         }
 
-        StateStore::file($this->stateFile)->rememberResponseAccount($responseId, $account->accountId());
+        $this->stateStore()->rememberResponseAccount($responseId, $account->accountId());
     }
 
     private function rememberResponseAffinityFromSseFrame(string $frame, CodexAccount $account): void
@@ -1911,7 +2008,7 @@ final class CodexProxyServer
         }
 
         $nestedResponseId = $decoded['response']['id'] ?? null;
-        if (is_string($nestedResponseId) && trim($nestedResponseId) !== '') {
+        if (in_array($decoded['type'] ?? null, ['response.completed', 'response.done'], true) && is_string($nestedResponseId) && trim($nestedResponseId) !== '') {
             return trim($nestedResponseId);
         }
 
@@ -1924,10 +2021,20 @@ final class CodexProxyServer
         return null;
     }
 
+    private function forgetRejectedResponseAffinityFromPayload(string $payload, CodexAccount $account): bool
+    {
+        $previousResponseId = $this->previousResponseId($payload);
+        if ($previousResponseId === null) {
+            return false;
+        }
+
+        return $this->stateStore()->forgetResponseAccount($previousResponseId, $account->accountId());
+    }
+
     /** @return array<string,mixed> */
     private function sessionTraceContext(SessionKey $sessionKey): array
     {
-        $binding = StateStore::file($this->stateFile)->sessionBinding($sessionKey->primary);
+        $binding = $this->stateStore()->sessionBinding($sessionKey->primary);
         if (!is_array($binding)) {
             return [];
         }
@@ -1979,7 +2086,7 @@ final class CodexProxyServer
 
     private function touchSessionBinding(SessionKey $sessionKey, ?int $seenAt = null): void
     {
-        $state = StateStore::file($this->stateFile);
+        $state = $this->stateStore();
         $state->touchSession($sessionKey->primary, $seenAt);
         if ($sessionKey->fallback !== null && $sessionKey->fallback !== '' && $sessionKey->fallback !== $sessionKey->primary) {
             $state->touchSession($sessionKey->fallback, $seenAt);

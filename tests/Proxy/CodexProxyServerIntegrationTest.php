@@ -994,7 +994,7 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
-    public function testRebindsWebSocketSessionByProbingAccountsAfterPreviousResponseNotFound(): void
+    public function testDoesNotProbeAccountsAfterPreviousResponseNotFoundForWebSocketSession(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {
             self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
@@ -1041,16 +1041,15 @@ final class CodexProxyServerIntegrationTest extends TestCase
             });
 
             self::assertCount(1, $frames);
-            self::assertStringContainsString('resp_beta_next', $frames[0]);
-            self::assertStringNotContainsString('previous_response_not_found', $frames[0]);
+            self::assertStringContainsString('response.failed', $frames[0]);
+            self::assertStringContainsString('previous_response_not_found', $frames[0]);
 
-            $attempts = $this->waitForJsonLines($captureFile, 2);
-            self::assertSame(['acct-alpha', 'acct-beta'], array_column($attempts, 'account_id'));
+            $attempts = $this->waitForJsonLines($captureFile, 1);
+            self::assertSame(['acct-alpha'], array_column($attempts, 'account_id'));
 
             $state = $this->waitForJsonFile($home . '/state.json');
-            self::assertSame('acct-beta', $state['sessions']['x-session-id:session-old-1']);
-            self::assertSame('lineage_switch', $state['session_meta']['x-session-id:session-old-1']['selection_source'] ?? null);
-            self::assertSame('acct-beta', $state['responses']['resp_beta_next'] ?? null);
+            self::assertSame('acct-alpha', $state['sessions']['x-session-id:session-old-1']);
+            self::assertSame('new_session', $state['session_meta']['x-session-id:session-old-1']['selection_source'] ?? null);
             self::assertSame(0, $state['accounts']['acct-alpha']['cooldown_until'] ?? 0);
             self::assertSame(0, $state['accounts']['acct-beta']['cooldown_until'] ?? 0);
         } finally {
@@ -1059,13 +1058,14 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
-    public function testUsesStoredResponseAffinityBeforeExistingWebSocketBinding(): void
+    public function testKeepsExistingWebSocketBindingBeforeStoredResponseAffinity(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {
             self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
         }
 
         $home = $this->tempDir('proxy-websocket-response-affinity');
+        $recentSessionAt = time() - 30;
         $accountsDir = $home . '/accounts';
         mkdir($accountsDir, 0700, true);
         $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
@@ -1078,8 +1078,8 @@ final class CodexProxyServerIntegrationTest extends TestCase
             'session_meta' => [
                 'x-session-id:session-old-2' => [
                     'selection_source' => 'new_session',
-                    'bound_at' => 1000,
-                    'last_seen_at' => 1000,
+                    'bound_at' => $recentSessionAt,
+                    'last_seen_at' => $recentSessionAt,
                 ],
             ],
             'responses' => [
@@ -1124,21 +1124,22 @@ final class CodexProxyServerIntegrationTest extends TestCase
             });
 
             self::assertCount(1, $frames);
-            self::assertStringContainsString('resp_beta_next', $frames[0]);
+            self::assertStringContainsString('response.failed', $frames[0]);
+            self::assertStringContainsString('previous_response_not_found', $frames[0]);
 
             $attempts = $this->waitForJsonLines($captureFile, 1);
-            self::assertSame('acct-beta', $attempts[0]['account_id']);
+            self::assertSame('acct-alpha', $attempts[0]['account_id']);
 
             $state = $this->waitForJsonFile($home . '/state.json');
-            self::assertSame('acct-beta', $state['sessions']['x-session-id:session-old-2']);
-            self::assertSame('rebind_response_affinity', $state['session_meta']['x-session-id:session-old-2']['selection_source'] ?? null);
+            self::assertSame('acct-alpha', $state['sessions']['x-session-id:session-old-2']);
+            self::assertSame('new_session', $state['session_meta']['x-session-id:session-old-2']['selection_source'] ?? null);
         } finally {
             $this->stopProcess($proxy ?? null);
             $this->stopProcess($upstream ?? null);
         }
     }
 
-    public function testReturnsExplicitPreviousResponseNotFoundWhenAllAccountsRejectLineage(): void
+    public function testReturnsResponseFailedWhenAllAccountsRejectLineage(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {
             self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
@@ -1185,11 +1186,12 @@ final class CodexProxyServerIntegrationTest extends TestCase
             });
 
             self::assertCount(1, $frames);
+            self::assertStringContainsString('response.failed', $frames[0]);
             self::assertStringContainsString('previous_response_not_found', $frames[0]);
             self::assertStringNotContainsString('upstream_websocket_error', $frames[0]);
 
-            $attempts = $this->waitForJsonLines($captureFile, 2);
-            self::assertSame(['acct-alpha', 'acct-beta'], array_column($attempts, 'account_id'));
+            $attempts = $this->waitForJsonLines($captureFile, 1);
+            self::assertSame(['acct-alpha'], array_column($attempts, 'account_id'));
 
             $state = $this->waitForJsonFile($home . '/state.json');
             self::assertSame(0, $state['accounts']['acct-alpha']['cooldown_until'] ?? 0);
@@ -1200,7 +1202,88 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
-    public function testSwitchesReusedUpstreamWebSocketWhenStoredResponseAffinityTargetsDifferentAccount(): void
+    public function testForgetsStaleResponseAffinityWhenOwnerRejectsLineageOverWebSocket(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-stale-affinity-owner-miss');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+        $this->writeJson($accountsDir . '/beta.account.json', $this->accountFixture('beta'));
+        $this->writeJson($home . '/state.json', [
+            'accounts' => [],
+            'sessions' => [
+                'x-session-id:session-stale-affinity-owner-miss' => 'acct-alpha',
+            ],
+            'session_meta' => [
+                'x-session-id:session-stale-affinity-owner-miss' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => time() - 60,
+                    'last_seen_at' => time() - 60,
+                ],
+            ],
+            'responses' => [
+                'resp_prev_beta' => 'acct-alpha',
+            ],
+            'cursor' => 0,
+            'usage' => [],
+        ]);
+
+        $captureFile = $home . '/upstream-websocket-request.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-previous-response-upstream.php', (string) $upstreamPort, $captureFile, 'all-miss'], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $frames = [];
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$frames): void {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $client->set(['timeout' => 5]);
+                $client->setHeaders([
+                    'X-Session-Id' => 'session-stale-affinity-owner-miss',
+                ]);
+                if (!$client->upgrade('/v1/responses')) {
+                    $frames[] = 'upgrade failed: ' . (string) $client->errCode;
+                    $client->close();
+                    return;
+                }
+
+                $client->push('{"input":"continue","previous_response_id":"resp_prev_beta"}');
+                $frame = $client->recv(5);
+                if (is_object($frame) && property_exists($frame, 'data')) {
+                    $frames[] = (string) $frame->data;
+                } elseif ($frame !== false && $frame !== '') {
+                    $frames[] = (string) $frame;
+                }
+                $client->close();
+            });
+
+            self::assertCount(1, $frames);
+            self::assertStringContainsString('response.failed', $frames[0]);
+            self::assertStringContainsString('previous_response_not_found', $frames[0]);
+
+            $attempts = $this->waitForJsonLines($captureFile, 1);
+            self::assertSame(['acct-alpha'], array_column($attempts, 'account_id'));
+
+            $state = $this->waitForJsonFile($home . '/state.json');
+            self::assertArrayNotHasKey('resp_prev_beta', $state['responses'] ?? []);
+            self::assertSame('acct-alpha', $state['sessions']['x-session-id:session-stale-affinity-owner-miss'] ?? null);
+            self::assertSame('new_session', $state['session_meta']['x-session-id:session-stale-affinity-owner-miss']['selection_source'] ?? null);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testKeepsReusedUpstreamWebSocketSessionBeforeStoredResponseAffinity(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {
             self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
@@ -1266,22 +1349,22 @@ final class CodexProxyServerIntegrationTest extends TestCase
 
             self::assertCount(2, $frames);
             self::assertStringContainsString('resp_alpha_fresh', $frames[0]);
-            self::assertStringContainsString('resp_beta_next', $frames[1]);
-            self::assertStringNotContainsString('previous_response_not_found', $frames[1]);
+            self::assertStringContainsString('response.failed', $frames[1]);
+            self::assertStringContainsString('previous_response_not_found', $frames[1]);
 
             $attempts = $this->waitForJsonLines($captureFile, 2);
-            self::assertSame(['acct-alpha', 'acct-beta'], array_column($attempts, 'account_id'));
+            self::assertSame(['acct-alpha', 'acct-alpha'], array_column($attempts, 'account_id'));
 
             $state = $this->waitForJsonFile($home . '/state.json');
-            self::assertSame('acct-beta', $state['sessions']['x-session-id:session-reuse-affinity']);
-            self::assertSame('rebind_response_affinity', $state['session_meta']['x-session-id:session-reuse-affinity']['selection_source'] ?? null);
+            self::assertSame('acct-alpha', $state['sessions']['x-session-id:session-reuse-affinity']);
+            self::assertSame('new_session', $state['session_meta']['x-session-id:session-reuse-affinity']['selection_source'] ?? null);
         } finally {
             $this->stopProcess($proxy ?? null);
             $this->stopProcess($upstream ?? null);
         }
     }
 
-    public function testRetriesHttpFallbackAcrossAccountsForLineageErrorsWithoutCooldown(): void
+    public function testDoesNotRetryHttpFallbackAcrossAccountsForLineageErrors(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {
             self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
@@ -1329,19 +1412,17 @@ final class CodexProxyServerIntegrationTest extends TestCase
             });
 
             self::assertNotSame([], $frames);
-            self::assertStringContainsString('resp_http_beta_next', implode("\n", $frames));
-            self::assertStringNotContainsString('previous_response_not_found', implode("\n", $frames));
+            self::assertStringContainsString('response.failed', implode("\n", $frames));
+            self::assertStringContainsString('previous_response_not_found', implode("\n", $frames));
 
-            $attempts = $this->waitForJsonLines($captureFile, 3);
+            $attempts = $this->waitForJsonLines($captureFile, 2);
             self::assertSame('GET', $attempts[0]['method']);
             self::assertSame('POST', $attempts[1]['method']);
-            self::assertSame('POST', $attempts[2]['method']);
             self::assertSame('acct-alpha', $attempts[1]['account_id']);
-            self::assertSame('acct-beta', $attempts[2]['account_id']);
 
             $state = $this->waitForJsonFile($home . '/state.json');
             self::assertSame(0, $state['accounts']['acct-alpha']['cooldown_until'] ?? 0);
-            self::assertSame('acct-beta', $state['sessions']['previous_response_id:resp_prev_beta']);
+            self::assertSame('acct-alpha', $state['sessions']['previous_response_id:resp_prev_beta']);
         } finally {
             $this->stopProcess($proxy ?? null);
             $this->stopProcess($upstream ?? null);
@@ -1355,6 +1436,7 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
 
         $home = $this->tempDir('proxy-http-compact-affinity');
+        $recentSessionAt = time() - 30;
         $accountsDir = $home . '/accounts';
         mkdir($accountsDir, 0700, true);
         $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
@@ -1367,8 +1449,8 @@ final class CodexProxyServerIntegrationTest extends TestCase
             'session_meta' => [
                 'previous_response_id:resp_compact_beta' => [
                     'selection_source' => 'new_session',
-                    'bound_at' => 1000,
-                    'last_seen_at' => 1000,
+                    'bound_at' => $recentSessionAt,
+                    'last_seen_at' => $recentSessionAt,
                 ],
             ],
             'responses' => [],
@@ -1417,6 +1499,164 @@ final class CodexProxyServerIntegrationTest extends TestCase
             self::assertSame('acct-beta', $state['responses']['resp_compact_beta'] ?? null);
             self::assertSame('acct-beta', $state['sessions']['previous_response_id:resp_compact_beta']);
             self::assertSame('rebind_response_affinity', $state['session_meta']['previous_response_id:resp_compact_beta']['selection_source'] ?? null);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testPrunesStaleSessionBindingsDuringSubsequentProxyWrites(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-session-retention');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+        $this->writeJson($home . '/state.json', [
+            'accounts' => [],
+            'sessions' => [],
+            'session_meta' => [],
+            'responses' => [],
+            'cursor' => 0,
+            'usage' => [],
+        ]);
+
+        $captureFile = $home . '/upstream-streaming-request.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-streaming-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $http = new GuzzleClient(['http_errors' => false, 'timeout' => 5]);
+            $first = $http->post("http://127.0.0.1:{$proxyPort}/v1/responses", [
+                'headers' => [
+                    'Content-Type' => 'application/json',
+                    'X-Request-Id' => 'integration-session-retention-first',
+                ],
+                'body' => '{"input":"hello","session_id":"session-live"}',
+            ]);
+            self::assertSame(200, $first->getStatusCode());
+            self::assertStringContainsString('resp_stream_1', (string) $first->getBody());
+
+            $state = $this->waitForJsonFile($home . '/state.json');
+            $staleAt = time() - 90_000;
+            $state['sessions']['session_id:session-stale-a'] = 'acct-alpha';
+            $state['sessions']['session_id:session-stale-b'] = 'acct-alpha';
+            $state['session_meta']['session_id:session-stale-a'] = [
+                'selection_source' => 'new_session',
+                'bound_at' => $staleAt,
+                'last_seen_at' => $staleAt,
+            ];
+            $state['session_meta']['session_id:session-stale-b'] = [
+                'selection_source' => 'new_session',
+                'bound_at' => $staleAt,
+                'last_seen_at' => $staleAt,
+            ];
+            $this->writeJson($home . '/state.json', $state);
+
+            $second = $http->post("http://127.0.0.1:{$proxyPort}/v1/responses", [
+                'headers' => [
+                    'Content-Type' => 'application/json',
+                    'X-Request-Id' => 'integration-session-retention-second',
+                ],
+                'body' => '{"input":"again","session_id":"session-trigger"}',
+            ]);
+            self::assertSame(200, $second->getStatusCode());
+            self::assertStringContainsString('resp_stream_1', (string) $second->getBody());
+
+            $finalState = $this->waitForJsonFile($home . '/state.json');
+            self::assertSame('acct-alpha', $finalState['sessions']['session_id:session-live'] ?? null);
+            self::assertSame('acct-alpha', $finalState['sessions']['session_id:session-trigger'] ?? null);
+            self::assertArrayNotHasKey('session_id:session-stale-a', $finalState['sessions']);
+            self::assertArrayNotHasKey('session_id:session-stale-b', $finalState['sessions']);
+            self::assertArrayNotHasKey('session_id:session-stale-a', $finalState['session_meta']);
+            self::assertArrayNotHasKey('session_id:session-stale-b', $finalState['session_meta']);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testReplaysMixedCodexSessionSequenceWithoutLineageOrStateGrowth(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-replay-soak');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+        $this->writeJson($accountsDir . '/beta.account.json', $this->accountFixture('beta'));
+        $this->writeJson($home . '/state.json', [
+            'accounts' => [],
+            'sessions' => [],
+            'session_meta' => [],
+            'responses' => [],
+            'cursor' => 0,
+            'usage' => [],
+        ]);
+
+        $captureFile = $home . '/upstream-replay.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-replay-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $firstId = $this->webSocketReplayTurn($proxyPort, '{"input":"turn-1","session_id":"replay-session"}');
+            $secondId = $this->httpReplayTurn($proxyPort, '/v1/responses', '{"input":"turn-2","previous_response_id":"' . $firstId . '"}');
+            $compactId = $this->httpJsonReplayTurn($proxyPort, '/v1/responses/compact', '{"input":"compact","previous_response_id":"' . $secondId . '"}');
+            $thirdId = $this->webSocketReplayTurn($proxyPort, '{"input":"turn-3","previous_response_id":"' . $compactId . '"}');
+
+            self::assertStringStartsWith('resp_', $firstId);
+            self::assertStringStartsWith('resp_', $secondId);
+            self::assertStringStartsWith('resp_compact_', $compactId);
+            self::assertStringStartsWith('resp_', $thirdId);
+
+            $staleAt = time() - 90_000;
+            $state = $this->waitForJsonFile($home . '/state.json');
+            for ($index = 0; $index < 5; $index++) {
+                $key = 'session_id:replay-stale-' . $index;
+                $state['sessions'][$key] = 'acct-alpha';
+                $state['session_meta'][$key] = [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $staleAt,
+                    'last_seen_at' => $staleAt,
+                ];
+            }
+            $this->writeJson($home . '/state.json', $state);
+
+            $fourthId = $this->httpReplayTurn($proxyPort, '/v1/responses', '{"input":"turn-4","previous_response_id":"' . $thirdId . '"}');
+            self::assertStringStartsWith('resp_', $fourthId);
+
+            $attempts = $this->waitForJsonLines($captureFile, 5);
+            $accounts = array_values(array_unique(array_map(static fn (array $attempt): string => (string) ($attempt['account_id'] ?? ''), $attempts)));
+            self::assertCount(1, $accounts);
+            self::assertNotSame('', $accounts[0]);
+            foreach ($attempts as $attempt) {
+                self::assertFalse((bool) ($attempt['lineage_miss'] ?? false));
+            }
+
+            $finalState = $this->waitForJsonFile($home . '/state.json');
+            self::assertSame($accounts[0], $finalState['responses'][$firstId] ?? null);
+            self::assertSame($accounts[0], $finalState['responses'][$secondId] ?? null);
+            self::assertSame($accounts[0], $finalState['responses'][$compactId] ?? null);
+            self::assertSame($accounts[0], $finalState['responses'][$thirdId] ?? null);
+            self::assertArrayNotHasKey('session_id:replay-stale-0', $finalState['sessions']);
+            self::assertLessThanOrEqual(5, count($finalState['sessions']));
         } finally {
             $this->stopProcess($proxy ?? null);
             $this->stopProcess($upstream ?? null);
@@ -1559,7 +1799,7 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
-    public function testReturnsExplicitPreviousResponseNotFoundForHttpWhenAllAccountsRejectLineage(): void
+    public function testReturnsPreviousResponseNotFoundForHttpWithoutAccountProbe(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {
             self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
@@ -1595,8 +1835,8 @@ final class CodexProxyServerIntegrationTest extends TestCase
             self::assertStringContainsString('application/json', strtolower($response->getHeaderLine('Content-Type')));
             self::assertStringContainsString('previous_response_not_found', (string) $response->getBody());
 
-            $attempts = $this->waitForJsonLines($captureFile, 2);
-            self::assertSame(['acct-alpha', 'acct-beta'], array_column($attempts, 'account_id'));
+            $attempts = $this->waitForJsonLines($captureFile, 1);
+            self::assertSame(['acct-alpha'], array_column($attempts, 'account_id'));
 
             $state = $this->waitForJsonFile($home . '/state.json');
             self::assertSame(0, $state['accounts']['acct-alpha']['cooldown_until'] ?? 0);
@@ -1655,11 +1895,12 @@ final class CodexProxyServerIntegrationTest extends TestCase
             self::assertStringContainsString('resp_ws_done', $frames[0]);
 
             $state = $this->waitForJsonFile($home . '/state.json');
+            $recentSessionAt = time() - 30;
             $state['sessions']['previous_response_id:resp_ws_done'] = 'acct-beta';
             $state['session_meta']['previous_response_id:resp_ws_done'] = [
                 'selection_source' => 'new_session',
-                'bound_at' => 1000,
-                'last_seen_at' => 1000,
+                'bound_at' => $recentSessionAt,
+                'last_seen_at' => $recentSessionAt,
             ];
             $this->writeJson($home . '/state.json', $state);
 
@@ -1757,6 +1998,96 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
+    public function testPreservesLineageTraceContextAcrossInitialWebSocketUpgradeHardSwitches(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-upgrade-lineage-trace');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+        $this->writeJson($accountsDir . '/beta.account.json', $this->accountFixture('beta'));
+        $this->writeJson($accountsDir . '/gamma.account.json', $this->accountFixture('gamma'));
+        $this->writeJson($home . '/state.json', [
+            'accounts' => [],
+            'sessions' => [],
+            'session_meta' => [],
+            'responses' => [
+                'resp_prev_alpha' => 'acct-alpha',
+            ],
+            'cursor' => 0,
+            'usage' => [],
+        ]);
+
+        $captureFile = $home . '/upstream-websocket-upgrades.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-upgrade-quota-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $payload = null;
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$payload): void {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $client->set(['timeout' => 5]);
+                if (!$client->upgrade('/v1/responses')) {
+                    $payload = 'upgrade failed: ' . (string) $client->errCode;
+                    $client->close();
+                    return;
+                }
+
+                $client->push('{"input":"hello","previous_response_id":"resp_prev_alpha"}');
+                $frame = $client->recv(5);
+                $payload = is_object($frame) && property_exists($frame, 'data') ? (string) $frame->data : (string) $frame;
+                $client->close();
+            });
+
+            self::assertStringContainsString('resp_ws_upgrade_gamma', (string) $payload);
+
+            $deadline = microtime(true) + 5.0;
+            $matched = null;
+            do {
+                if (is_file($home . '/logs/trace.jsonl')) {
+                    foreach (file($home . '/logs/trace.jsonl', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+                        $record = json_decode($line, true, flags: JSON_THROW_ON_ERROR);
+                        if (!is_array($record)) {
+                            continue;
+                        }
+                        $context = $record['context'] ?? null;
+                        if (!is_array($context)) {
+                            continue;
+                        }
+                        if (($context['phase'] ?? null) !== 'account_selected') {
+                            continue;
+                        }
+                        if (($context['selection_source'] ?? null) !== 'hard_switch') {
+                            continue;
+                        }
+                        if (($context['previous_response_id'] ?? null) !== 'resp_prev_alpha') {
+                            continue;
+                        }
+                        $matched = $context;
+                        break 2;
+                    }
+                }
+                usleep(50_000);
+            } while (microtime(true) < $deadline);
+
+            self::assertIsArray($matched);
+            self::assertSame('acct-alpha', $matched['response_affinity_account_id'] ?? null);
+            self::assertTrue($matched['response_affinity_hit'] ?? false);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
     public function testRetriesReplacementWebSocketUpgradeAcrossAllAvailableAccountsBeforeForwardingSuccess(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {
@@ -1810,6 +2141,96 @@ final class CodexProxyServerIntegrationTest extends TestCase
             self::assertSame('acct-gamma', $state['sessions']['x-codex-turn-state:turn-websocket-replacement-upgrade-retry-all']);
             self::assertGreaterThan(time(), $state['accounts']['acct-alpha']['cooldown_until']);
             self::assertGreaterThan(time(), $state['accounts']['acct-beta']['cooldown_until']);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testPreservesLineageTraceContextAcrossReplacementWebSocketUpgradeHardSwitches(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-replacement-upgrade-lineage-trace');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+        $this->writeJson($accountsDir . '/beta.account.json', $this->accountFixture('beta'));
+        $this->writeJson($accountsDir . '/gamma.account.json', $this->accountFixture('gamma'));
+        $this->writeJson($home . '/state.json', [
+            'accounts' => [],
+            'sessions' => [],
+            'session_meta' => [],
+            'responses' => [
+                'resp_prev_alpha' => 'acct-alpha',
+            ],
+            'cursor' => 0,
+            'usage' => [],
+        ]);
+
+        $captureFile = $home . '/upstream-websocket-upgrades.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-stream-then-upgrade-quota-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $payload = null;
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$payload): void {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $client->set(['timeout' => 5]);
+                if (!$client->upgrade('/v1/responses')) {
+                    $payload = 'upgrade failed: ' . (string) $client->errCode;
+                    $client->close();
+                    return;
+                }
+
+                $client->push('{"input":"hello","previous_response_id":"resp_prev_alpha"}');
+                $frame = $client->recv(5);
+                $payload = is_object($frame) && property_exists($frame, 'data') ? (string) $frame->data : (string) $frame;
+                $client->close();
+            });
+
+            self::assertStringContainsString('resp_ws_stream_upgrade_gamma', (string) $payload);
+
+            $deadline = microtime(true) + 5.0;
+            $matched = null;
+            do {
+                if (is_file($home . '/logs/trace.jsonl')) {
+                    foreach (file($home . '/logs/trace.jsonl', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+                        $record = json_decode($line, true, flags: JSON_THROW_ON_ERROR);
+                        if (!is_array($record)) {
+                            continue;
+                        }
+                        $context = $record['context'] ?? null;
+                        if (!is_array($context)) {
+                            continue;
+                        }
+                        if (($context['phase'] ?? null) !== 'account_selected') {
+                            continue;
+                        }
+                        if (($context['selection_source'] ?? null) !== 'hard_switch') {
+                            continue;
+                        }
+                        if (($context['previous_response_id'] ?? null) !== 'resp_prev_alpha') {
+                            continue;
+                        }
+                        $matched = $context;
+                        break 2;
+                    }
+                }
+                usleep(50_000);
+            } while (microtime(true) < $deadline);
+
+            self::assertIsArray($matched);
+            self::assertSame('acct-alpha', $matched['response_affinity_account_id'] ?? null);
+            self::assertTrue($matched['response_affinity_hit'] ?? false);
         } finally {
             $this->stopProcess($proxy ?? null);
             $this->stopProcess($upstream ?? null);
@@ -2420,7 +2841,7 @@ final class CodexProxyServerIntegrationTest extends TestCase
             $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
 
             $payload = null;
-            \Swoole\Coroutine\run(static function () use ($proxyPort, &$payload): void {
+            \Swoole\Coroutine\run(static function () use ($proxyPort, $captureFile, &$payload): void {
                 $firstClient = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
                 $firstClient->set(['timeout' => 5]);
                 $firstClient->setHeaders(['X-Codex-Turn-State' => 'turn-abort-active']);
@@ -2430,6 +2851,14 @@ final class CodexProxyServerIntegrationTest extends TestCase
                     return;
                 }
                 $firstClient->push('{"input":"hello 1"}');
+                $deadline = microtime(true) + 2.0;
+                do {
+                    $captured = is_file($captureFile) ? (string) file_get_contents($captureFile) : '';
+                    if (substr_count($captured, '"event":"message"') >= 1) {
+                        break;
+                    }
+                    \Swoole\Coroutine::sleep(0.02);
+                } while (microtime(true) < $deadline);
                 $firstClient->close();
 
                 $secondClient = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
@@ -2459,6 +2888,196 @@ final class CodexProxyServerIntegrationTest extends TestCase
             self::assertSame('open', $attempts[0]['event']);
             self::assertSame('message', $attempts[1]['event']);
             self::assertSame('open', $attempts[2]['event']);
+            self::assertSame('message', $attempts[3]['event']);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testBridgesUpstreamWebSocketTurnStateAcrossRetry(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-turn-state-retry');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-websocket-request.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-turn-state-retry-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $payload = null;
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$payload): void {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $client->set(['timeout' => 5]);
+                if (!$client->upgrade('/v1/responses')) {
+                    $payload = 'upgrade failed: ' . (string) $client->errCode;
+                    $client->close();
+                    return;
+                }
+
+                $client->push('{"input":"hello turn state"}');
+                $frame = $client->recv(5);
+                $payload = is_object($frame) && property_exists($frame, 'data') ? (string) $frame->data : (string) $frame;
+                $client->close();
+            });
+
+            self::assertNotNull($payload);
+            self::assertStringContainsString('resp_ws_turn_state_retry', (string) $payload);
+
+            $attempts = $this->waitForJsonLines($captureFile, 4);
+            self::assertSame('handshake', $attempts[0]['event']);
+            self::assertNull($attempts[0]['turn_state_header']);
+            self::assertSame('message', $attempts[1]['event']);
+            self::assertSame('handshake', $attempts[2]['event']);
+            self::assertSame('ts-bridge-1', $attempts[2]['turn_state_header']);
+            self::assertSame('message', $attempts[3]['event']);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testDoesNotReuseWebSocketTurnStateAcrossTurnsOnSameDownstreamConnection(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-turn-state-isolation');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-websocket-request.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-turn-state-isolation-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $frames = [];
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$frames): void {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $client->set(['timeout' => 5]);
+                if (!$client->upgrade('/v1/responses')) {
+                    $frames[] = 'upgrade failed: ' . (string) $client->errCode;
+                    $client->close();
+                    return;
+                }
+
+                $client->push(json_encode([
+                    'type' => 'response.create',
+                    'input' => 'hello first turn',
+                    'client_metadata' => [
+                        'x-codex-turn-metadata' => '{"turn_id":"turn-1"}',
+                    ],
+                ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+                $first = $client->recv(5);
+                $frames[] = is_object($first) && property_exists($first, 'data') ? (string) $first->data : (string) $first;
+
+                \Swoole\Coroutine::sleep(0.1);
+
+                $client->push(json_encode([
+                    'type' => 'response.create',
+                    'input' => 'hello second turn',
+                    'client_metadata' => [
+                        'x-codex-turn-metadata' => '{"turn_id":"turn-2"}',
+                    ],
+                ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+                $second = $client->recv(5);
+                $frames[] = is_object($second) && property_exists($second, 'data') ? (string) $second->data : (string) $second;
+                $client->close();
+            });
+
+            self::assertCount(2, $frames);
+            self::assertStringContainsString('resp_ws_first_turn', $frames[0]);
+            self::assertStringContainsString('resp_ws_second_turn', $frames[1]);
+
+            $attempts = $this->waitForJsonLines($captureFile, 4);
+            self::assertSame('handshake', $attempts[0]['event']);
+            self::assertNull($attempts[0]['turn_state_header']);
+            self::assertSame('message', $attempts[1]['event']);
+            self::assertSame('handshake', $attempts[2]['event']);
+            self::assertNull($attempts[2]['turn_state_header']);
+            self::assertSame('{"turn_id":"turn-2"}', $attempts[2]['turn_metadata_header']);
+            self::assertSame('message', $attempts[3]['event']);
+        } finally {
+            $this->stopProcess($proxy ?? null);
+            $this->stopProcess($upstream ?? null);
+        }
+    }
+
+    public function testDoesNotReuseWebSocketTurnStateAcrossIdenticalPayloadTurnsWithoutMetadata(): void
+    {
+        if (!extension_loaded('swoole') || !function_exists('proc_open')) {
+            self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
+        }
+
+        $home = $this->tempDir('proxy-websocket-turn-state-isolation-no-metadata');
+        $accountsDir = $home . '/accounts';
+        mkdir($accountsDir, 0700, true);
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+
+        $captureFile = $home . '/upstream-websocket-request.jsonl';
+        $upstreamPort = $this->freePortOrSkip();
+        $proxyPort = $this->freePortOrSkip();
+
+        $upstream = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/fake-websocket-turn-state-isolation-upstream.php', (string) $upstreamPort, $captureFile], $home . '/upstream.stderr.log');
+        $proxy = $this->startProcess([PHP_BINARY, dirname(__DIR__) . '/Fixtures/start-proxy.php', (string) $proxyPort, (string) $upstreamPort, $accountsDir, $home], $home . '/proxy.stderr.log');
+
+        try {
+            $this->waitForHttp("http://127.0.0.1:{$upstreamPort}/health");
+            $this->waitForHttp("http://127.0.0.1:{$proxyPort}/health", $home . '/proxy.stderr.log');
+
+            $frames = [];
+            \Swoole\Coroutine\run(static function () use ($proxyPort, &$frames): void {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+                $client->set(['timeout' => 5]);
+                if (!$client->upgrade('/v1/responses')) {
+                    $frames[] = 'upgrade failed: ' . (string) $client->errCode;
+                    $client->close();
+                    return;
+                }
+
+                $payload = '{"type":"response.create","input":"repeat"}';
+                $client->push($payload);
+                $first = $client->recv(5);
+                $frames[] = is_object($first) && property_exists($first, 'data') ? (string) $first->data : (string) $first;
+
+                \Swoole\Coroutine::sleep(0.1);
+
+                $client->push($payload);
+                $second = $client->recv(5);
+                $frames[] = is_object($second) && property_exists($second, 'data') ? (string) $second->data : (string) $second;
+                $client->close();
+            });
+
+            self::assertCount(2, $frames);
+            self::assertStringContainsString('resp_ws_first_turn', $frames[0]);
+            self::assertStringContainsString('resp_ws_second_turn', $frames[1]);
+
+            $attempts = $this->waitForJsonLines($captureFile, 4);
+            self::assertSame('handshake', $attempts[0]['event']);
+            self::assertNull($attempts[0]['turn_state_header']);
+            self::assertSame('message', $attempts[1]['event']);
+            self::assertSame('handshake', $attempts[2]['event']);
+            self::assertNull($attempts[2]['turn_state_header']);
             self::assertSame('message', $attempts[3]['event']);
         } finally {
             $this->stopProcess($proxy ?? null);
@@ -2701,6 +3320,113 @@ final class CodexProxyServerIntegrationTest extends TestCase
         } while (microtime(true) < $deadline);
 
         self::fail('Timed out waiting for trace in: ' . $path . ($phase !== null ? ' phase=' . $phase : ''));
+    }
+
+    /**
+     * @param callable(array<string,mixed>):bool $predicate
+     * @return list<array<string,mixed>>
+     */
+    private function waitForTraceRecords(string $path, callable $predicate): array
+    {
+        $deadline = microtime(true) + 5.0;
+        do {
+            if (is_file($path)) {
+                $matches = [];
+                foreach (file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+                    $record = json_decode($line, true, flags: JSON_THROW_ON_ERROR);
+                    if (!is_array($record) || !$predicate($record)) {
+                        continue;
+                    }
+                    $matches[] = $record;
+                }
+                if ($matches !== []) {
+                    return $matches;
+                }
+            }
+            usleep(50_000);
+        } while (microtime(true) < $deadline);
+
+        self::fail('Timed out waiting for matching trace records in: ' . $path);
+    }
+
+    private function webSocketReplayTurn(int $proxyPort, string $payload): string
+    {
+        $framePayload = null;
+        \Swoole\Coroutine\run(static function () use ($proxyPort, $payload, &$framePayload): void {
+            $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $proxyPort);
+            $client->set(['timeout' => 5]);
+            if (!$client->upgrade('/v1/responses')) {
+                $framePayload = 'upgrade failed: ' . (string) $client->errCode;
+                $client->close();
+                return;
+            }
+
+            $client->push($payload);
+            $frame = $client->recv(5);
+            $framePayload = is_object($frame) && property_exists($frame, 'data') ? (string) $frame->data : (string) $frame;
+            $client->close();
+        });
+
+        return $this->responseIdFromReplayBody((string) $framePayload);
+    }
+
+    private function httpReplayTurn(int $proxyPort, string $path, string $payload): string
+    {
+        $http = new GuzzleClient(['http_errors' => false, 'timeout' => 5]);
+        $response = $http->post("http://127.0.0.1:{$proxyPort}{$path}", [
+            'headers' => ['Content-Type' => 'application/json'],
+            'body' => $payload,
+        ]);
+
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getBody());
+
+        return $this->responseIdFromReplayBody((string) $response->getBody());
+    }
+
+    private function httpJsonReplayTurn(int $proxyPort, string $path, string $payload): string
+    {
+        $http = new GuzzleClient(['http_errors' => false, 'timeout' => 5]);
+        $response = $http->post("http://127.0.0.1:{$proxyPort}{$path}", [
+            'headers' => ['Content-Type' => 'application/json'],
+            'body' => $payload,
+        ]);
+
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getBody());
+        $decoded = json_decode((string) $response->getBody(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        $responseId = $decoded['id'] ?? null;
+        self::assertIsString($responseId);
+
+        return $responseId;
+    }
+
+    private function responseIdFromReplayBody(string $body): string
+    {
+        $payloads = [];
+        foreach (preg_split('/\R/', $body) ?: [] as $line) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+            if (str_starts_with($line, 'data:')) {
+                $payloads[] = trim(substr($line, 5));
+                continue;
+            }
+            $payloads[] = $line;
+        }
+
+        foreach ($payloads as $payload) {
+            $decoded = json_decode($payload, true);
+            if (!is_array($decoded)) {
+                continue;
+            }
+            $responseId = $decoded['response']['id'] ?? $decoded['id'] ?? null;
+            if (is_string($responseId) && $responseId !== '') {
+                return $responseId;
+            }
+        }
+
+        self::fail('Response id not found in replay body: ' . $body);
     }
 
     /** @param list<string> $command */

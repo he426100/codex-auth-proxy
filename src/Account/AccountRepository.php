@@ -42,6 +42,41 @@ final class AccountRepository
         return $accounts;
     }
 
+    public function revision(): string
+    {
+        if (!is_dir($this->directory)) {
+            return 'accounts:none';
+        }
+
+        $files = glob(rtrim($this->directory, '/') . '/*.account.json') ?: [];
+        sort($files);
+        if ($files === []) {
+            return 'accounts:none';
+        }
+
+        $parts = [];
+        foreach ($files as $file) {
+            clearstatcache(true, $file);
+            if (!is_file($file)) {
+                continue;
+            }
+
+            $parts[] = implode("\0", [
+                basename($file),
+                (string) (fileinode($file) ?: 0),
+                (string) (filesize($file) ?: 0),
+                (string) (filemtime($file) ?: 0),
+                (string) (filectime($file) ?: 0),
+                hash_file('sha256', $file) ?: '',
+            ]);
+        }
+        if ($parts === []) {
+            return 'accounts:none';
+        }
+
+        return 'accounts:' . hash('sha256', implode("\n", $parts));
+    }
+
     public function save(string $name, CodexAccount $account): string
     {
         $path = rtrim($this->directory, '/') . '/' . $this->safeName($name) . '.account.json';

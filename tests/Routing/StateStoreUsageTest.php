@@ -110,6 +110,27 @@ final class StateStoreUsageTest extends TestCase
         ], $state->sessionBinding('thread-1'));
     }
 
+    public function testTouchMissingSessionDoesNotCreateStateFile(): void
+    {
+        $dir = $this->tempDir('cap-state-touch-missing');
+        $path = $dir . '/state.json';
+        $state = StateStore::file($path);
+
+        $state->touchSession('missing-thread', 1234567999);
+
+        self::assertFileDoesNotExist($path);
+    }
+
+    public function testForgetsSessionBindingAndMetadata(): void
+    {
+        $state = StateStore::memory();
+        $state->bindSession('thread-1', 'acct-alpha', 'new_session', 1234567890);
+
+        self::assertTrue($state->forgetSession('thread-1'));
+        self::assertNull($state->sessionBinding('thread-1'));
+        self::assertFalse($state->forgetSession('thread-1'));
+    }
+
     public function testPersistsResponseAffinityMappings(): void
     {
         $dir = $this->tempDir('cap-state');
@@ -121,6 +142,21 @@ final class StateStoreUsageTest extends TestCase
 
         self::assertSame('acct-beta', $reloaded->responseAccount('resp_123'));
         self::assertSame('acct-beta', $reloaded->snapshot()['responses']['resp_123'] ?? null);
+    }
+
+    public function testForgetsResponseAffinityOnlyWhenExpectedOwnerMatches(): void
+    {
+        $dir = $this->tempDir('cap-state');
+        $path = $dir . '/state.json';
+        $state = StateStore::file($path);
+
+        $state->rememberResponseAccount('resp_123', 'acct-alpha');
+
+        self::assertFalse($state->forgetResponseAccount('resp_123', 'acct-beta'));
+        self::assertSame('acct-alpha', StateStore::file($path)->responseAccount('resp_123'));
+
+        self::assertTrue($state->forgetResponseAccount('resp_123', 'acct-alpha'));
+        self::assertNull(StateStore::file($path)->responseAccount('resp_123'));
     }
 
     public function testPersistsAndReloadsCachedAccountUsage(): void
@@ -226,6 +262,76 @@ final class StateStoreUsageTest extends TestCase
         self::assertSame('acct-1', $snapshot['responses']['resp_2047'] ?? null);
         self::assertSame('acct-2', $snapshot['responses']['resp_2048'] ?? null);
         self::assertSame('acct-0', $snapshot['responses']['resp_2049'] ?? null);
+    }
+
+    public function testPruningResponseAffinityMappingsKeepsNewestEntriesAcrossExternalWrites(): void
+    {
+        $dir = $this->tempDir('cap-state');
+        $path = $dir . '/state.json';
+        $serveState = StateStore::file($path);
+
+        for ($index = 0; $index < 2048; $index++) {
+            $serveState->rememberResponseAccount('resp_' . $index, 'acct-' . ($index % 3));
+        }
+
+        StateStore::file($path)->rememberResponseAccount('resp_external', 'acct-external');
+        $serveState->rememberResponseAccount('resp_local', 'acct-local');
+
+        $snapshot = StateStore::file($path)->snapshot();
+        self::assertCount(2048, $snapshot['responses']);
+        self::assertArrayNotHasKey('resp_0', $snapshot['responses']);
+        self::assertArrayNotHasKey('resp_1', $snapshot['responses']);
+        self::assertSame('acct-external', $snapshot['responses']['resp_external'] ?? null);
+        self::assertSame('acct-local', $snapshot['responses']['resp_local'] ?? null);
+    }
+
+    public function testPrunesStaleSessionBindingsWhenRetentionWindowIsExceeded(): void
+    {
+        $dir = $this->tempDir('cap-state');
+        $path = $dir . '/state.json';
+        $retentionSeconds = 60;
+        $now = time();
+        $state = StateStore::file($path, $retentionSeconds);
+
+        $state->bindSession('thread-stale', 'acct-alpha', 'new_session', $now - 600, $now - 600);
+        $state->bindSession('thread-active', 'acct-beta', 'new_session', $now - 30, $now - 10);
+
+        $snapshot = StateStore::file($path, $retentionSeconds)->snapshot();
+        self::assertArrayNotHasKey('thread-stale', $snapshot['sessions']);
+        self::assertArrayNotHasKey('thread-stale', $snapshot['session_meta']);
+        self::assertSame('acct-beta', $snapshot['sessions']['thread-active'] ?? null);
+        self::assertSame('new_session', $snapshot['session_meta']['thread-active']['selection_source'] ?? null);
+    }
+
+    public function testPrunesOrphanedStaleSessionMetadataWithoutRemovingLegacyBindings(): void
+    {
+        $dir = $this->tempDir('cap-state');
+        $path = $dir . '/state.json';
+        $retentionSeconds = 60;
+        $now = time();
+        $this->writeJson($path, [
+            'accounts' => [],
+            'sessions' => [
+                'thread-legacy' => 'acct-alpha',
+            ],
+            'session_meta' => [
+                'thread-orphan' => [
+                    'selection_source' => 'new_session',
+                    'bound_at' => $now - 600,
+                    'last_seen_at' => $now - 600,
+                ],
+            ],
+            'responses' => [],
+            'cursor' => 0,
+            'usage' => [],
+        ]);
+
+        StateStore::file($path, $retentionSeconds)->setCooldownUntil('acct-alpha', 1234567890);
+
+        $snapshot = StateStore::file($path, $retentionSeconds)->snapshot();
+        self::assertSame('acct-alpha', $snapshot['sessions']['thread-legacy'] ?? null);
+        self::assertArrayNotHasKey('thread-legacy', $snapshot['session_meta']);
+        self::assertArrayNotHasKey('thread-orphan', $snapshot['session_meta']);
     }
 
     public function testConsumesCursorAcrossFileBackedInstances(): void

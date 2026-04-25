@@ -28,7 +28,7 @@ final class SchedulerTest extends TestCase
         self::assertSame('acct-alpha', $second->accountId());
     }
 
-    public function testPrefersResponseAffinityOverExistingAvailableBinding(): void
+    public function testKeepsStableSessionBindingBeforeResponseAffinity(): void
     {
         $validator = new AccountFileValidator();
         $accounts = [
@@ -43,15 +43,39 @@ final class SchedulerTest extends TestCase
         $selection = [];
         $account = $scheduler->accountForSession('thread-1', null, $selection, 'acct-beta');
 
+        self::assertSame('acct-alpha', $account->accountId());
+        self::assertSame('bound_session', $selection['source']);
+        self::assertSame([
+            'account_id' => 'acct-alpha',
+            'selection_source' => 'new_session',
+            'bound_at' => 1000,
+            'last_seen_at' => 1000,
+        ], $state->sessionBinding('thread-1'));
+    }
+
+    public function testUsesResponseAffinityForPreviousResponseSessionKey(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha')),
+            $validator->validate($this->accountFixture('beta')),
+        ];
+        $state = StateStore::memory();
+        $state->bindSession('previous_response_id:resp_prev_beta', 'acct-alpha', 'new_session', 1000);
+        $state->rememberResponseAccount('resp_prev_beta', 'acct-beta');
+        $scheduler = new Scheduler($accounts, $state, static fn (): int => 1000);
+
+        $selection = [];
+        $account = $scheduler->accountForSession('previous_response_id:resp_prev_beta', null, $selection, 'acct-beta');
+
         self::assertSame('acct-beta', $account->accountId());
         self::assertSame('rebind_response_affinity', $selection['source']);
-        self::assertSame('acct-alpha', $selection['previous_account_id']);
         self::assertSame([
             'account_id' => 'acct-beta',
             'selection_source' => 'rebind_response_affinity',
             'bound_at' => 1000,
             'last_seen_at' => 1000,
-        ], $state->sessionBinding('thread-1'));
+        ], $state->sessionBinding('previous_response_id:resp_prev_beta'));
     }
 
     public function testSkipsCooldownAccountsForNewSessions(): void

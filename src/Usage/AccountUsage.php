@@ -16,4 +16,9 @@ final class AccountUsage
         public readonly ?array $raw = null,
     ) {
     }
+
+    public function hasCompleteRateLimits(): bool
+    {
+        return $this->primary !== null && $this->secondary !== null;
+    }
 }

@@ -403,23 +403,48 @@ final class CodexProxyServerTest extends TestCase
         self::assertSame([], $method->invoke($server, '{"input":"hello"}', null));
     }
 
+    public function testRemembersOnlyCompletedResponseEventsAsResponseAffinity(): void
+    {
+        $statePath = $this->tempDir('proxy-response-affinity-events') . '/state.json';
+        $server = $this->server([
+            'stateFile' => $statePath,
+        ]);
+        $method = new ReflectionMethod(CodexProxyServer::class, 'rememberResponseAffinityFromPayload');
+
+        $method->invoke(
+            $server,
+            '{"type":"response.created","response":{"id":"resp_created_only"}}',
+            $this->account('alpha'),
+        );
+        self::assertNull(StateStore::file($statePath)->responseAccount('resp_created_only'));
+
+        $method->invoke(
+            $server,
+            '{"type":"response.completed","response":{"id":"resp_completed"}}',
+            $this->account('alpha'),
+        );
+        self::assertSame('acct-alpha', StateStore::file($statePath)->responseAccount('resp_completed'));
+    }
+
     public function testTouchesExistingSessionBindingWhenWebSocketSessionIsReused(): void
     {
         $statePath = $this->tempDir('proxy-session-touch-state') . '/state.json';
-        StateStore::file($statePath)->bindSession('session-selection', 'acct-beta', 'new_session', 1_700_000_000, 1_700_000_000);
+        $boundAt = time() - 120;
+        $seenAt = $boundAt + 120;
+        StateStore::file($statePath)->bindSession('session-selection', 'acct-beta', 'new_session', $boundAt, $boundAt);
 
         $server = $this->server([
             'stateFile' => $statePath,
         ]);
 
         $method = new ReflectionMethod(CodexProxyServer::class, 'touchSessionBinding');
-        $method->invoke($server, new SessionKey('session-selection'), 1_700_000_120);
+        $method->invoke($server, new SessionKey('session-selection'), $seenAt);
 
         self::assertSame([
             'account_id' => 'acct-beta',
             'selection_source' => 'new_session',
-            'bound_at' => 1_700_000_000,
-            'last_seen_at' => 1_700_000_120,
+            'bound_at' => $boundAt,
+            'last_seen_at' => $seenAt,
         ], StateStore::file($statePath)->sessionBinding('session-selection'));
     }
 
@@ -491,6 +516,34 @@ final class CodexProxyServerTest extends TestCase
         $method = new ReflectionMethod(CodexProxyServer::class, 'shutdownEvent');
 
         self::assertSame('shutdown', $method->invoke($server));
+    }
+
+    public function testServerSettingsEnableCoroutineHooksForBlockingClients(): void
+    {
+        $server = $this->server();
+        $method = new ReflectionMethod(CodexProxyServer::class, 'serverSettings');
+
+        $settings = $method->invoke($server);
+
+        self::assertTrue($settings['enable_coroutine'] ?? false);
+        self::assertArrayHasKey('hook_flags', $settings);
+        self::assertSame(SWOOLE_HOOK_ALL, (int) $settings['hook_flags']);
+    }
+
+    public function testTracksWebSocketFdsClosingAfterTerminalError(): void
+    {
+        $server = $this->server();
+        $mark = new ReflectionMethod(CodexProxyServer::class, 'markWebSocketClosing');
+        $isClosing = new ReflectionMethod(CodexProxyServer::class, 'isWebSocketClosing');
+        $clear = new ReflectionMethod(CodexProxyServer::class, 'clearWebSocketClosing');
+
+        self::assertFalse($isClosing->invoke($server, 7));
+
+        $mark->invoke($server, 7);
+        self::assertTrue($isClosing->invoke($server, 7));
+
+        $clear->invoke($server, 7);
+        self::assertFalse($isClosing->invoke($server, 7));
     }
 
     /** @param array<string,string|int> $baseOptions */

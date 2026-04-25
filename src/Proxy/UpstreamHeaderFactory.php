@@ -20,7 +20,7 @@ final class UpstreamHeaderFactory
      * @param array<string,mixed> $downstreamHeaders
      * @return array<string,string>
      */
-    public function build(array $downstreamHeaders, CodexAccount $account, string $host, bool $websocket, ?string $httpAccept = null): array
+    public function build(array $downstreamHeaders, CodexAccount $account, string $host, bool $websocket, ?string $httpAccept = null, ?string $turnState = null, ?string $turnMetadata = null): array
     {
         $headers = [];
         foreach ($downstreamHeaders as $key => $value) {
@@ -62,7 +62,7 @@ final class UpstreamHeaderFactory
         $headers['Authorization'] = 'Bearer ' . $account->accessToken();
         $headers['Accept-Encoding'] = 'identity';
 
-        $this->setCodexHeaders($headers, $downstreamHeaders, $account, $websocket, $httpAccept);
+        $this->setCodexHeaders($headers, $downstreamHeaders, $account, $websocket, $httpAccept, $turnState, $turnMetadata);
 
         return $headers;
     }
@@ -71,7 +71,7 @@ final class UpstreamHeaderFactory
      * @param array<string,string> $headers
      * @param array<string,mixed> $downstreamHeaders
      */
-    private function setCodexHeaders(array &$headers, array $downstreamHeaders, CodexAccount $account, bool $websocket, ?string $httpAccept): void
+    private function setCodexHeaders(array &$headers, array $downstreamHeaders, CodexAccount $account, bool $websocket, ?string $httpAccept, ?string $turnState, ?string $turnMetadata): void
     {
         $betaFeatures = $this->headerValue($downstreamHeaders, 'x-codex-beta-features');
         if ($betaFeatures === null && $websocket) {
@@ -93,6 +93,12 @@ final class UpstreamHeaderFactory
             'Version' => 'version',
         ] as $canonical => $source) {
             $value = $this->headerValue($downstreamHeaders, $source);
+            if ($value === null && $source === 'x-codex-turn-state') {
+                $value = $turnState !== null && trim($turnState) !== '' ? trim($turnState) : null;
+            }
+            if ($source === 'x-codex-turn-metadata' && $turnMetadata !== null && trim($turnMetadata) !== '') {
+                $value = trim($turnMetadata);
+            }
             if ($value !== null) {
                 $headers[$canonical] = $value;
             }

@@ -74,7 +74,7 @@ final class AccountsCommand extends ProxyCommand
     private function listAccounts(AccountRepository $repository, AppConfig $config, InputInterface $input, OutputInterface $output): int
     {
         $accounts = $repository->load();
-        $state = StateStore::file($config->stateFile);
+        $state = $this->stateStore($config);
         $selectionPreview = $this->selectionPreview($accounts, $state);
         $bindingSummary = $this->bindingSummary($state, $config->activeSessionWindowSeconds);
 
@@ -117,7 +117,7 @@ final class AccountsCommand extends ProxyCommand
     {
         $results = $this->fetchLiveUsageResults($repository, $config, $this->stringArgument($input, 'name'));
         $failed = $this->hasFailure($results);
-        $state = StateStore::file($config->stateFile);
+        $state = $this->stateStore($config);
 
         if ((bool) $input->getOption('json')) {
             $output->writeln(json_encode(array_map(fn (array $result): array => $this->statusJson($result), $results), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
@@ -148,7 +148,7 @@ final class AccountsCommand extends ProxyCommand
             throw new InvalidArgumentException('No accounts found');
         }
 
-        $liveState = StateStore::file($config->stateFile);
+        $liveState = $this->stateStore($config);
         $selectionPreview = $this->selectionPreview($accounts, $liveState, $sessionKey);
         if (!$selectionPreview['account'] instanceof CodexAccount) {
             throw new RuntimeException($selectionPreview['error'] ?? 'No available Codex account');
@@ -200,7 +200,7 @@ final class AccountsCommand extends ProxyCommand
 
     private function bindings(AccountRepository $repository, AppConfig $config, InputInterface $input, OutputInterface $output): int
     {
-        $state = StateStore::file($config->stateFile);
+        $state = $this->stateStore($config);
         $rows = $this->bindingRows(
             $repository,
             $state,
@@ -247,7 +247,7 @@ final class AccountsCommand extends ProxyCommand
     {
         $results = $this->fetchLiveUsageResults($repository, $config, $this->stringArgument($input, 'name'));
         $failed = $this->hasFailure($results);
-        $state = StateStore::file($config->stateFile);
+        $state = $this->stateStore($config);
 
         if ((bool) $input->getOption('json')) {
             $output->writeln(json_encode(array_map(fn (array $result): array => $this->statusJson($result), $results), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
@@ -295,7 +295,7 @@ final class AccountsCommand extends ProxyCommand
             runtimeProfile: $runtimeProfile,
             proxyEnv: $outboundProxyConfig->environment(),
         );
-        $state = StateStore::file($config->stateFile);
+        $state = $this->stateStore($config);
         $results = [];
 
         foreach ($accounts as $account) {
@@ -1009,6 +1009,14 @@ final class AccountsCommand extends ProxyCommand
         }
 
         return $availability->isConfirmedAvailable ? 'yes' : 'unknown';
+    }
+
+    private function stateStore(AppConfig $config): StateStore
+    {
+        return StateStore::file(
+            $config->stateFile,
+            StateStore::sessionRetentionSeconds($config->activeSessionWindowSeconds),
+        );
     }
 
     private function formatCooldown(int $cooldownUntil, int $now): string
