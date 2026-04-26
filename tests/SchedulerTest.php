@@ -78,6 +78,38 @@ final class SchedulerTest extends TestCase
         ], $state->sessionBinding('previous_response_id:resp_prev_beta'));
     }
 
+    public function testKeepsUnavailableResponseAffinityForPreviousResponseSessionKey(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha')),
+            $validator->validate($this->accountFixture('beta')),
+        ];
+        $state = StateStore::memory();
+        $state->bindSession('previous_response_id:resp_prev_beta', 'acct-alpha', 'new_session', 1000);
+        $state->rememberResponseAccount('resp_prev_beta', 'acct-beta');
+        $state->setAccountUsage('acct-beta', new CachedAccountUsage(
+            'plus',
+            1000,
+            null,
+            new CachedRateLimitWindow(100.0, 0.0, 300, 1300),
+            new CachedRateLimitWindow(20.0, 80.0, 3600, 4600),
+        ));
+        $scheduler = new Scheduler($accounts, $state, static fn (): int => 1000);
+
+        $selection = [];
+        $account = $scheduler->accountForSession('previous_response_id:resp_prev_beta', null, $selection, 'acct-beta');
+
+        self::assertSame('acct-beta', $account->accountId());
+        self::assertSame('rebind_response_affinity_unavailable', $selection['source']);
+        self::assertSame([
+            'account_id' => 'acct-beta',
+            'selection_source' => 'rebind_response_affinity_unavailable',
+            'bound_at' => 1000,
+            'last_seen_at' => 1000,
+        ], $state->sessionBinding('previous_response_id:resp_prev_beta'));
+    }
+
     public function testSkipsCooldownAccountsForNewSessions(): void
     {
         $validator = new AccountFileValidator();
@@ -416,6 +448,100 @@ final class SchedulerTest extends TestCase
             'bound_at' => 1000,
             'last_seen_at' => 1200,
         ], $state->sessionBinding('thread-sticky-ranking'));
+    }
+
+    public function testKeepsActiveBoundSessionEvenWhenCachedUsageLooksExhausted(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha')),
+            $validator->validate($this->accountFixture('beta')),
+        ];
+        $state = StateStore::memory();
+        $state->bindSession('thread-active', 'acct-alpha', 'new_session', 900, 990);
+        $state->setAccountUsage('acct-alpha', new CachedAccountUsage(
+            'plus',
+            990,
+            null,
+            new CachedRateLimitWindow(100.0, 0.0, 300, 1300),
+            new CachedRateLimitWindow(20.0, 80.0, 3600, 4600),
+        ));
+        $scheduler = new Scheduler($accounts, $state, static fn (): int => 1000, activeSessionWindowSeconds: 300);
+
+        $selection = [];
+        $account = $scheduler->accountForSession('thread-active', null, $selection);
+
+        self::assertSame('acct-alpha', $account->accountId());
+        self::assertSame('bound_active_session', $selection['source']);
+        self::assertSame([
+            'account_id' => 'acct-alpha',
+            'selection_source' => 'new_session',
+            'bound_at' => 900,
+            'last_seen_at' => 1000,
+        ], $state->sessionBinding('thread-active'));
+    }
+
+    public function testRebindsStaleBoundSessionWhenCachedUsageLooksExhausted(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha')),
+            $validator->validate($this->accountFixture('beta')),
+        ];
+        $state = StateStore::memory();
+        $state->bindSession('thread-stale', 'acct-alpha', 'new_session', 100, 500);
+        $state->setAccountUsage('acct-alpha', new CachedAccountUsage(
+            'plus',
+            990,
+            null,
+            new CachedRateLimitWindow(100.0, 0.0, 300, 1300),
+            new CachedRateLimitWindow(20.0, 80.0, 3600, 4600),
+        ));
+        $scheduler = new Scheduler($accounts, $state, static fn (): int => 1000, activeSessionWindowSeconds: 300);
+
+        $selection = [];
+        $account = $scheduler->accountForSession('thread-stale', null, $selection);
+
+        self::assertSame('acct-beta', $account->accountId());
+        self::assertSame('rebind_unavailable_session', $selection['source']);
+    }
+
+    public function testDoesNotKeepActiveBoundSessionWhenAccountIsDisabled(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha', ['enabled' => false])),
+            $validator->validate($this->accountFixture('beta')),
+        ];
+        $state = StateStore::memory();
+        $state->bindSession('thread-disabled', 'acct-alpha', 'new_session', 900, 990);
+        $scheduler = new Scheduler($accounts, $state, static fn (): int => 1000, activeSessionWindowSeconds: 300);
+
+        $selection = [];
+        $account = $scheduler->accountForSession('thread-disabled', null, $selection);
+
+        self::assertSame('acct-beta', $account->accountId());
+        self::assertSame('rebind_unavailable_session', $selection['source']);
+    }
+
+    public function testRecordHardFailureUpdatesCandidateSnapshotImmediately(): void
+    {
+        $validator = new AccountFileValidator();
+        $accounts = [
+            $validator->validate($this->accountFixture('alpha')),
+            $validator->validate($this->accountFixture('beta')),
+        ];
+        $state = StateStore::memory();
+        $scheduler = new Scheduler($accounts, $state, static fn (): int => 1000);
+
+        $first = $scheduler->accountForSession('thread-before-failure');
+        $scheduler->recordHardFailure('acct-alpha', 300, 'quota');
+        $second = $scheduler->accountForSession('thread-after-failure');
+
+        self::assertSame('acct-alpha', $first->accountId());
+        self::assertSame('acct-beta', $second->accountId());
+        self::assertSame(1300, $state->cooldownUntil('acct-alpha'));
+        self::assertSame('quota', $state->cooldownReason('acct-alpha'));
     }
 
     public function testRecordsFallbackBindingSourceInState(): void

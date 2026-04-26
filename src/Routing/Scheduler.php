@@ -45,6 +45,7 @@ final class Scheduler
         private readonly StateStore $state,
         private readonly mixed $clock = null,
         private readonly float $lowQuotaLeftThresholdPercent = self::DEFAULT_LOW_QUOTA_LEFT_THRESHOLD_PERCENT,
+        private readonly int $activeSessionWindowSeconds = 0,
     )
     {
         $this->accounts = $accounts;
@@ -74,6 +75,15 @@ final class Scheduler
 
                 return $preferred;
             }
+            if ($preferred !== null && $preferred->enabled() && $this->canResponseAffinityOverrideBinding($sessionKey)) {
+                $source = $boundAccountId !== null ? 'rebind_response_affinity_unavailable' : 'response_affinity_unavailable';
+                $this->state->bindSession($sessionKey, $preferred->accountId(), $source, $this->now());
+                $selection = $this->selectionReport($source, $preferred, $boundAccountId !== null ? [
+                    'previous_account_id' => $boundAccountId,
+                ] : []);
+
+                return $preferred;
+            }
         }
 
         if ($boundAccountId !== null) {
@@ -81,6 +91,11 @@ final class Scheduler
             if ($bound !== null && $this->isAvailableInSnapshot($snapshot, $bound->accountId())) {
                 $this->state->touchSession($sessionKey, $this->now());
                 $selection = $this->selectionReport('bound_session', $bound);
+                return $bound;
+            }
+            if ($bound !== null && $bound->enabled() && $this->isActiveSessionBinding($sessionKey)) {
+                $this->state->touchSession($sessionKey, $this->now());
+                $selection = $this->selectionReport('bound_active_session', $bound);
                 return $bound;
             }
         }
@@ -157,6 +172,17 @@ final class Scheduler
         ], $orderedCandidates);
 
         return $replacement;
+    }
+
+    public function recordHardFailure(string $accountId, int $cooldownSeconds, string $cooldownReason): void
+    {
+        if ($accountId === '') {
+            return;
+        }
+
+        $now = $this->now();
+        $this->state->setCooldown($accountId, $now + max(1, $cooldownSeconds), $cooldownReason, $now);
+        $this->candidateSnapshot = null;
     }
 
     /** @param list<string> $excludeAccountIds */
@@ -330,6 +356,25 @@ final class Scheduler
     private function canResponseAffinityOverrideBinding(string $sessionKey): bool
     {
         return str_starts_with($sessionKey, 'previous_response_id:');
+    }
+
+    private function isActiveSessionBinding(string $sessionKey): bool
+    {
+        if ($this->activeSessionWindowSeconds <= 0) {
+            return false;
+        }
+
+        $binding = $this->state->sessionBinding($sessionKey);
+        if ($binding === null) {
+            return false;
+        }
+
+        $lastSeenAt = $binding['last_seen_at'] ?? $binding['bound_at'] ?? null;
+        if (!is_int($lastSeenAt) || $lastSeenAt <= 0) {
+            return false;
+        }
+
+        return $lastSeenAt >= ($this->now() - $this->activeSessionWindowSeconds);
     }
 
     private function availability(CodexAccount $account): AccountAvailability

@@ -1998,7 +1998,7 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
-    public function testPreservesLineageTraceContextAcrossInitialWebSocketUpgradeHardSwitches(): void
+    public function testBlocksInitialWebSocketUpgradeHardSwitchForPreviousResponsePayload(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {
             self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
@@ -2048,40 +2048,14 @@ final class CodexProxyServerIntegrationTest extends TestCase
                 $client->close();
             });
 
-            self::assertStringContainsString('resp_ws_upgrade_gamma', (string) $payload);
+            self::assertStringContainsString('usage_limit_reached', (string) $payload);
 
-            $deadline = microtime(true) + 5.0;
-            $matched = null;
-            do {
-                if (is_file($home . '/logs/trace.jsonl')) {
-                    foreach (file($home . '/logs/trace.jsonl', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
-                        $record = json_decode($line, true, flags: JSON_THROW_ON_ERROR);
-                        if (!is_array($record)) {
-                            continue;
-                        }
-                        $context = $record['context'] ?? null;
-                        if (!is_array($context)) {
-                            continue;
-                        }
-                        if (($context['phase'] ?? null) !== 'account_selected') {
-                            continue;
-                        }
-                        if (($context['selection_source'] ?? null) !== 'hard_switch') {
-                            continue;
-                        }
-                        if (($context['previous_response_id'] ?? null) !== 'resp_prev_alpha') {
-                            continue;
-                        }
-                        $matched = $context;
-                        break 2;
-                    }
-                }
-                usleep(50_000);
-            } while (microtime(true) < $deadline);
+            $attempts = $this->waitForJsonLines($captureFile, 1);
+            self::assertSame(['acct-alpha'], array_column($attempts, 'account_id'));
 
-            self::assertIsArray($matched);
-            self::assertSame('acct-alpha', $matched['response_affinity_account_id'] ?? null);
-            self::assertTrue($matched['response_affinity_hit'] ?? false);
+            $state = $this->waitForJsonFile($home . '/state.json');
+            self::assertGreaterThan(time(), $state['accounts']['acct-alpha']['cooldown_until']);
+            self::assertSame('acct-alpha', $state['responses']['resp_prev_alpha']);
         } finally {
             $this->stopProcess($proxy ?? null);
             $this->stopProcess($upstream ?? null);
@@ -2147,7 +2121,7 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
-    public function testPreservesLineageTraceContextAcrossReplacementWebSocketUpgradeHardSwitches(): void
+    public function testBlocksReplacementWebSocketHardSwitchForPreviousResponsePayload(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {
             self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
@@ -2197,40 +2171,14 @@ final class CodexProxyServerIntegrationTest extends TestCase
                 $client->close();
             });
 
-            self::assertStringContainsString('resp_ws_stream_upgrade_gamma', (string) $payload);
+            self::assertStringContainsString('usage_limit_reached', (string) $payload);
 
-            $deadline = microtime(true) + 5.0;
-            $matched = null;
-            do {
-                if (is_file($home . '/logs/trace.jsonl')) {
-                    foreach (file($home . '/logs/trace.jsonl', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
-                        $record = json_decode($line, true, flags: JSON_THROW_ON_ERROR);
-                        if (!is_array($record)) {
-                            continue;
-                        }
-                        $context = $record['context'] ?? null;
-                        if (!is_array($context)) {
-                            continue;
-                        }
-                        if (($context['phase'] ?? null) !== 'account_selected') {
-                            continue;
-                        }
-                        if (($context['selection_source'] ?? null) !== 'hard_switch') {
-                            continue;
-                        }
-                        if (($context['previous_response_id'] ?? null) !== 'resp_prev_alpha') {
-                            continue;
-                        }
-                        $matched = $context;
-                        break 2;
-                    }
-                }
-                usleep(50_000);
-            } while (microtime(true) < $deadline);
+            $attempts = $this->waitForJsonLines($captureFile, 1);
+            self::assertSame(['acct-alpha'], array_column($attempts, 'account_id'));
 
-            self::assertIsArray($matched);
-            self::assertSame('acct-alpha', $matched['response_affinity_account_id'] ?? null);
-            self::assertTrue($matched['response_affinity_hit'] ?? false);
+            $state = $this->waitForJsonFile($home . '/state.json');
+            self::assertGreaterThan(time(), $state['accounts']['acct-alpha']['cooldown_until']);
+            self::assertSame('acct-alpha', $state['responses']['resp_prev_alpha']);
         } finally {
             $this->stopProcess($proxy ?? null);
             $this->stopProcess($upstream ?? null);

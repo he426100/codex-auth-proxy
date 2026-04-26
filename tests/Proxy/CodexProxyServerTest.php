@@ -403,6 +403,15 @@ final class CodexProxyServerTest extends TestCase
         self::assertSame([], $method->invoke($server, '{"input":"hello"}', null));
     }
 
+    public function testDisallowsCrossAccountReplayForPreviousResponsePayload(): void
+    {
+        $server = $this->server();
+        $method = new ReflectionMethod(CodexProxyServer::class, 'canReplayPayloadOnDifferentAccount');
+
+        self::assertFalse($method->invoke($server, '{"input":"continue","previous_response_id":"resp_prev_beta"}'));
+        self::assertTrue($method->invoke($server, '{"input":"hello"}'));
+    }
+
     public function testRemembersOnlyCompletedResponseEventsAsResponseAffinity(): void
     {
         $statePath = $this->tempDir('proxy-response-affinity-events') . '/state.json';
