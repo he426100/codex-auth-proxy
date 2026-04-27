@@ -20,39 +20,12 @@ final class UpstreamHeaderFactory
      * @param array<string,mixed> $downstreamHeaders
      * @return array<string,string>
      */
-    public function build(array $downstreamHeaders, CodexAccount $account, string $host, bool $websocket, ?string $httpAccept = null, ?string $turnState = null, ?string $turnMetadata = null): array
+    public function build(array $downstreamHeaders, CodexAccount $account, string $host, bool $websocket, ?string $httpAccept = null, ?string $turnState = null, ?string $turnMetadata = null, bool $stripSessionAffinity = false): array
     {
         $headers = [];
         foreach ($downstreamHeaders as $key => $value) {
             $lower = strtolower((string) $key);
-            if (in_array($lower, [
-                'host',
-                'authorization',
-                'content-length',
-                'accept-encoding',
-                'connection',
-                'upgrade',
-                'sec-websocket-key',
-                'sec-websocket-version',
-                'sec-websocket-extensions',
-                'user-agent',
-                'accept',
-                'content-type',
-                'x-codex-beta-features',
-                'x-codex-turn-state',
-                'x-codex-turn-metadata',
-                'x-client-request-id',
-                'x-responsesapi-include-timing-metrics',
-                'version',
-                'openai-beta',
-                'originator',
-                'chatgpt-account-id',
-                'session_id',
-                'x-codex-window-id',
-                'x-openai-subagent',
-                'x-codex-parent-thread-id',
-                'x-openai-internal-codex-residency',
-            ], true)) {
+            if ($this->shouldDropDownstreamHeader($lower)) {
                 continue;
             }
             $headers[(string) $key] = is_array($value) ? implode(', ', $value) : (string) $value;
@@ -62,7 +35,7 @@ final class UpstreamHeaderFactory
         $headers['Authorization'] = 'Bearer ' . $account->accessToken();
         $headers['Accept-Encoding'] = 'identity';
 
-        $this->setCodexHeaders($headers, $downstreamHeaders, $account, $websocket, $httpAccept, $turnState, $turnMetadata);
+        $this->setCodexHeaders($headers, $downstreamHeaders, $account, $websocket, $httpAccept, $turnState, $turnMetadata, $stripSessionAffinity);
 
         return $headers;
     }
@@ -71,7 +44,7 @@ final class UpstreamHeaderFactory
      * @param array<string,string> $headers
      * @param array<string,mixed> $downstreamHeaders
      */
-    private function setCodexHeaders(array &$headers, array $downstreamHeaders, CodexAccount $account, bool $websocket, ?string $httpAccept, ?string $turnState, ?string $turnMetadata): void
+    private function setCodexHeaders(array &$headers, array $downstreamHeaders, CodexAccount $account, bool $websocket, ?string $httpAccept, ?string $turnState, ?string $turnMetadata, bool $stripSessionAffinity): void
     {
         $betaFeatures = $this->headerValue($downstreamHeaders, 'x-codex-beta-features');
         if ($betaFeatures === null && $websocket) {
@@ -92,6 +65,15 @@ final class UpstreamHeaderFactory
             'X-Codex-Parent-Thread-Id' => 'x-codex-parent-thread-id',
             'Version' => 'version',
         ] as $canonical => $source) {
+            if ($stripSessionAffinity && in_array($source, [
+                'x-codex-turn-state',
+                'x-codex-turn-metadata',
+                'session_id',
+                'x-codex-window-id',
+                'x-codex-parent-thread-id',
+            ], true)) {
+                continue;
+            }
             $value = $this->headerValue($downstreamHeaders, $source);
             if ($value === null && $source === 'x-codex-turn-state') {
                 $value = $turnState !== null && trim($turnState) !== '' ? trim($turnState) : null;
@@ -138,6 +120,51 @@ final class UpstreamHeaderFactory
         }
 
         return null;
+    }
+
+    private function shouldDropDownstreamHeader(string $lower): bool
+    {
+        if (in_array($lower, [
+            'host',
+            'authorization',
+            'content-length',
+            'accept-encoding',
+            'connection',
+            'upgrade',
+            'sec-websocket-key',
+            'sec-websocket-version',
+            'sec-websocket-extensions',
+            'user-agent',
+            'accept',
+            'content-type',
+            'cookie',
+            'x-api-key',
+            'api-key',
+            'x-codex-beta-features',
+            'x-codex-turn-state',
+            'x-codex-turn-metadata',
+            'x-client-request-id',
+            'x-responsesapi-include-timing-metrics',
+            'version',
+            'openai-beta',
+            'originator',
+            'chatgpt-account-id',
+            'session_id',
+            'x-codex-window-id',
+            'x-openai-subagent',
+            'x-codex-parent-thread-id',
+            'x-openai-internal-codex-residency',
+        ], true)) {
+            return true;
+        }
+
+        foreach (['x-stainless-', 'anthropic-'] as $prefix) {
+            if (str_starts_with($lower, $prefix)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function webSocketBetaHeader(?string $downstream): string

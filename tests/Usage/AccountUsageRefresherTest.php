@@ -34,6 +34,21 @@ final class AccountUsageRefresherTest extends TestCase
         self::assertSame(7.0, $usage?->primary?->leftPercent);
     }
 
+    public function testRefreshAllDoesNotClearAuthCooldown(): void
+    {
+        $repository = new AccountRepository($this->tempDir('cap-usage-refresh-auth-cooldown-accounts'));
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+        $repository->saveAccount($account);
+        $state = StateStore::memory();
+        $state->setCooldown('acct-alpha', 2_000, 'auth', 900);
+
+        $summary = (new AccountUsageRefresher(new RefresherFakeUsageClient()))->refreshAll($repository, $state, 1_000);
+
+        self::assertSame(['success' => 1, 'failure' => 0, 'skipped' => 0], $summary);
+        self::assertSame(2_000, $state->cooldownUntil('acct-alpha'));
+        self::assertSame('auth', $state->cooldownReason('acct-alpha'));
+    }
+
     public function testRefreshAllRecordsFailuresWithoutDroppingPreviousSnapshot(): void
     {
         $repository = new AccountRepository($this->tempDir('cap-usage-refresh-failure-accounts'));

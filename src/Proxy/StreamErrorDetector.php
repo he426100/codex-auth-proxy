@@ -26,7 +26,7 @@ final class StreamErrorDetector
         }
 
         $isErrorEvent = self::sseEvent($frame) === 'error';
-        $isErrorPayload = isset($decoded['error']) || ($decoded['type'] ?? null) === 'error';
+        $isErrorPayload = self::isErrorPayload($decoded);
         if (!$isErrorEvent && !$isErrorPayload) {
             return null;
         }
@@ -41,7 +41,7 @@ final class StreamErrorDetector
             return null;
         }
 
-        if (!isset($decoded['error']) && ($decoded['type'] ?? null) !== 'error') {
+        if (!self::isErrorPayload($decoded)) {
             return null;
         }
 
@@ -55,11 +55,11 @@ final class StreamErrorDetector
             return null;
         }
 
-        if (!isset($decoded['error']) && ($decoded['type'] ?? null) !== 'error') {
+        if (!self::isErrorPayload($decoded)) {
             return null;
         }
 
-        $status = $decoded['status'] ?? ($decoded['error']['status'] ?? null);
+        $status = $decoded['status'] ?? ($decoded['error']['status'] ?? ($decoded['response']['error']['status'] ?? null));
         if (!is_int($status) && !is_string($status)) {
             return null;
         }
@@ -76,7 +76,7 @@ final class StreamErrorDetector
             return false;
         }
 
-        return in_array($decoded['type'] ?? null, ['response.completed', 'response.done'], true);
+        return in_array($decoded['type'] ?? null, ['response.completed', 'response.done', 'response.failed', 'response.error'], true);
     }
 
     public static function isCompletedPayload(string $payload): bool
@@ -86,7 +86,7 @@ final class StreamErrorDetector
             return false;
         }
 
-        return in_array($decoded['type'] ?? null, ['response.completed', 'response.done'], true);
+        return in_array($decoded['type'] ?? null, ['response.completed', 'response.done', 'response.failed', 'response.error'], true);
     }
 
     /** @return array<string,mixed>|null */
@@ -130,5 +130,16 @@ final class StreamErrorDetector
         }
 
         return '';
+    }
+
+    /** @param array<string,mixed> $decoded */
+    private static function isErrorPayload(array $decoded): bool
+    {
+        if (isset($decoded['error']) || ($decoded['type'] ?? null) === 'error') {
+            return true;
+        }
+
+        return in_array($decoded['type'] ?? null, ['response.failed', 'response.error'], true)
+            && is_array($decoded['response']['error'] ?? null);
     }
 }

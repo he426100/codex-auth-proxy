@@ -29,8 +29,12 @@ final class ErrorClassifier
             return new ErrorClassification('quota', true, $this->cooldownUntil($body, $headers, $now));
         }
 
-        if ($statusCode >= 500) {
+        if ($statusCode === 408 || $statusCode >= 500) {
             return new ErrorClassification('transient', false, 0);
+        }
+
+        if ($statusCode === 402) {
+            return new ErrorClassification('payment', true, $now + $this->authCooldownSeconds);
         }
 
         if (!$this->hasExplicitErrorPayload($body)) {
@@ -61,6 +65,10 @@ final class ErrorClassifier
 
         if ($this->containsQuotaSignal($fields)) {
             return new ErrorClassification('quota', true, $this->cooldownUntil($body, $headers, $now));
+        }
+
+        if ($this->containsPaymentSignal($fields)) {
+            return new ErrorClassification('payment', true, $now + $this->authCooldownSeconds);
         }
 
         if ($this->containsLineageSignal($fields)) {
@@ -96,9 +104,21 @@ final class ErrorClassifier
             'quota_exceeded',
             'insufficient_quota',
             'rate_limit_exceeded',
+            'selected model is at capacity',
             'over limit',
             'too many requests',
             'usagelimitexceeded',
+        ]);
+    }
+
+    /** @param list<string> $fields */
+    private function containsPaymentSignal(array $fields): bool
+    {
+        return $this->containsSignal($fields, [
+            'billing',
+            'payment',
+            'payment_required',
+            'subscription',
         ]);
     }
 
@@ -156,6 +176,8 @@ final class ErrorClassifier
             $error = $decoded['error'];
         } elseif (($decoded['type'] ?? null) === 'error') {
             $error = is_array($decoded['error'] ?? null) ? $decoded['error'] : $decoded;
+        } elseif (($decoded['type'] ?? null) === 'response.failed' && is_array($decoded['response']['error'] ?? null)) {
+            $error = $decoded['response']['error'];
         }
 
         if (!is_array($error)) {

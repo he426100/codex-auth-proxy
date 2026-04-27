@@ -412,6 +412,52 @@ final class CodexProxyServerTest extends TestCase
         self::assertTrue($method->invoke($server, '{"input":"hello"}'));
     }
 
+    public function testDisallowsAccountSwitchForLineageLockedSession(): void
+    {
+        $statePath = $this->tempDir('proxy-lineage-switch-state') . '/state.json';
+        $state = StateStore::file($statePath);
+        $state->bindSession('session_id:live', 'acct-alpha', 'new_session', 1000, 1000);
+        $state->markSessionLineage('session_id:live', 'acct-alpha', 'resp_alpha_1', 1000);
+        $server = $this->server([
+            'stateFile' => $statePath,
+        ]);
+
+        $method = new ReflectionMethod(CodexProxyServer::class, 'canSwitchAccountForPayload');
+
+        self::assertFalse($method->invoke($server, new SessionKey('session_id:live'), '{"input":"hello"}'));
+        self::assertFalse($method->invoke($server, new SessionKey('session_id:new'), '{"input":"continue","previous_response_id":"resp_alpha_1"}'));
+        self::assertTrue($method->invoke($server, new SessionKey('session_id:new'), '{"input":"hello"}'));
+    }
+
+    public function testAllowsTransientSoftSwitchOnlyForReplayableUnboundPayloads(): void
+    {
+        $accountsDir = $this->tempDir('proxy-transient-soft-switch-accounts');
+        $this->writeJson($accountsDir . '/alpha.account.json', $this->accountFixture('alpha'));
+        $this->writeJson($accountsDir . '/beta.account.json', $this->accountFixture('beta'));
+        $statePath = $this->tempDir('proxy-transient-soft-switch-state') . '/state.json';
+        $state = StateStore::file($statePath);
+        $state->bindSession('session_id:live', 'acct-alpha', 'new_session', 1000, 1000);
+        $state->markSessionLineage('session_id:live', 'acct-alpha', 'resp_alpha_1', 1000);
+        $server = $this->server([
+            'accountsDir' => $accountsDir,
+            'stateFile' => $statePath,
+        ]);
+
+        $method = new ReflectionMethod(CodexProxyServer::class, 'canSoftSwitchTransient');
+        $classification = (new ErrorClassifier())->classify(502, 'bad gateway');
+        $result = [
+            'status' => 502,
+            'body' => 'bad gateway',
+            'headers' => [],
+            'streamed' => false,
+            'timings' => ['upstream' => 1.0, 'first_byte' => null],
+        ];
+
+        self::assertTrue($method->invoke($server, $classification, $result, new SessionKey('session_id:new'), '{"input":"hello"}', 1, new AccountRepository($accountsDir)));
+        self::assertFalse($method->invoke($server, $classification, $result, new SessionKey('session_id:live'), '{"input":"hello"}', 1, new AccountRepository($accountsDir)));
+        self::assertFalse($method->invoke($server, $classification, $result, new SessionKey('session_id:new'), '{"input":"continue","previous_response_id":"resp_alpha_1"}', 1, new AccountRepository($accountsDir)));
+    }
+
     public function testRemembersOnlyCompletedResponseEventsAsResponseAffinity(): void
     {
         $statePath = $this->tempDir('proxy-response-affinity-events') . '/state.json';
@@ -431,8 +477,31 @@ final class CodexProxyServerTest extends TestCase
             $server,
             '{"type":"response.completed","response":{"id":"resp_completed"}}',
             $this->account('alpha'),
+            new SessionKey('session-affinity'),
         );
         self::assertSame('acct-alpha', StateStore::file($statePath)->responseAccount('resp_completed'));
+    }
+
+    public function testRememberingResponseAffinityMarksSessionLineage(): void
+    {
+        $statePath = $this->tempDir('proxy-response-affinity-lineage') . '/state.json';
+        $now = time();
+        StateStore::file($statePath)->bindSession('session-affinity', 'acct-alpha', 'new_session', $now, $now);
+        $server = $this->server([
+            'stateFile' => $statePath,
+        ]);
+        $method = new ReflectionMethod(CodexProxyServer::class, 'rememberResponseAffinityFromPayload');
+
+        $method->invoke(
+            $server,
+            '{"type":"response.completed","response":{"id":"resp_completed"}}',
+            $this->account('alpha'),
+            new SessionKey('session-affinity'),
+        );
+
+        $state = StateStore::file($statePath);
+        self::assertSame('acct-alpha', $state->responseAccount('resp_completed'));
+        self::assertSame('acct-alpha', $state->sessionLineageAccount('session-affinity'));
     }
 
     public function testTouchesExistingSessionBindingWhenWebSocketSessionIsReused(): void
@@ -517,6 +586,33 @@ final class CodexProxyServerTest extends TestCase
         self::assertSame('codex_proxy_unavailable', $payload['error']['code']);
         self::assertSame('No Codex accounts configured', $payload['error']['message']);
         self::assertSame(503, $payload['error']['status']);
+    }
+
+    public function testWebSocketExecutionSessionKeyIsScopedToDownstreamFd(): void
+    {
+        $server = $this->server();
+        $method = new ReflectionMethod(CodexProxyServer::class, 'webSocketExecutionSessionKey');
+
+        $first = $method->invoke($server, 7, new SessionKey('session_id:shared', 'msg:fallback'));
+        $second = $method->invoke($server, 8, new SessionKey('session_id:shared', 'msg:fallback'));
+
+        self::assertSame('ws-fd:7:session_id:shared', $first->primary);
+        self::assertSame('ws-fd:7:msg:fallback', $first->fallback);
+        self::assertSame('ws-fd:8:session_id:shared', $second->primary);
+        self::assertNotSame($first->primary, $second->primary);
+    }
+
+    public function testResponseFailedPayloadKeepsNestedResponseErrorFields(): void
+    {
+        $server = $this->server();
+        $method = new ReflectionMethod(CodexProxyServer::class, 'responseFailedPayloadFromErrorBody');
+
+        $payload = $method->invoke($server, '{"type":"response.failed","response":{"error":{"code":"previous_response_not_found","message":"missing"}}}');
+
+        self::assertSame(
+            '{"type":"response.failed","response":{"error":{"code":"previous_response_not_found","message":"missing"}}}',
+            $payload,
+        );
     }
 
     public function testShutdownCleanupUsesSwooleShutdownEvent(): void

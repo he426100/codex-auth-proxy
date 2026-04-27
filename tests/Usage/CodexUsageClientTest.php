@@ -251,17 +251,93 @@ final class CodexUsageClientTest extends TestCase
         (new CodexUsageClient(baseUrl: 'https://chatgpt.com/backend-api', runtimeProfile: $this->runtimeProfile(), http: $http))->fetch($account);
     }
 
+    public function testRetriesTransientTransportFailures(): void
+    {
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            new RequestException('network down', new Request('GET', 'https://chatgpt.com/backend-api/wham/usage')),
+            new Response(200, ['Content-Type' => 'application/json'], json_encode([
+                'rateLimits' => [
+                    'primary' => ['usedPercent' => 10.0, 'windowDurationMins' => 300],
+                    'planType' => 'plus',
+                ],
+            ], JSON_THROW_ON_ERROR)),
+        ]));
+        $stack->push(Middleware::history($history));
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+
+        $usage = (new CodexUsageClient(
+            baseUrl: 'https://chatgpt.com/backend-api',
+            runtimeProfile: $this->runtimeProfile(),
+            http: new Client(['handler' => $stack]),
+        ))->fetch($account);
+
+        self::assertSame(10.0, $usage->primary?->usedPercent);
+        self::assertCount(2, $history);
+    }
+
+    public function testRetriesServerErrors(): void
+    {
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(502, ['Content-Type' => 'text/plain'], 'bad gateway'),
+            new Response(200, ['Content-Type' => 'application/json'], json_encode([
+                'rateLimits' => [
+                    'primary' => ['usedPercent' => 11.0, 'windowDurationMins' => 300],
+                    'planType' => 'plus',
+                ],
+            ], JSON_THROW_ON_ERROR)),
+        ]));
+        $stack->push(Middleware::history($history));
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+
+        $usage = (new CodexUsageClient(
+            baseUrl: 'https://chatgpt.com/backend-api',
+            runtimeProfile: $this->runtimeProfile(),
+            http: new Client(['handler' => $stack]),
+        ))->fetch($account);
+
+        self::assertSame(11.0, $usage->primary?->usedPercent);
+        self::assertCount(2, $history);
+    }
+
+    public function testDoesNotRetryClientErrors(): void
+    {
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(401, ['Content-Type' => 'application/json'], '{"error":{"code":"token_invalidated"}}'),
+            new Response(200, ['Content-Type' => 'application/json'], '{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"planType":"plus"}}'),
+        ]));
+        $stack->push(Middleware::history($history));
+        $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
+
+        try {
+            (new CodexUsageClient(
+                baseUrl: 'https://chatgpt.com/backend-api',
+                runtimeProfile: $this->runtimeProfile(),
+                http: new Client(['handler' => $stack]),
+            ))->fetch($account);
+            self::fail('Expected usage fetch to fail on 401');
+        } catch (RuntimeException $exception) {
+            self::assertStringContainsString('usage endpoint returned HTTP 401', $exception->getMessage());
+        }
+
+        self::assertCount(1, $history);
+    }
+
     public function testWrapsTransportFailures(): void
     {
         $http = new Client([
             'handler' => HandlerStack::create(new MockHandler([
+                new RequestException('network down', new Request('GET', 'https://chatgpt.com/backend-api/wham/usage')),
+                new RequestException('network down', new Request('GET', 'https://chatgpt.com/backend-api/wham/usage')),
                 new RequestException('network down', new Request('GET', 'https://chatgpt.com/backend-api/wham/usage')),
             ])),
         ]);
         $account = (new AccountFileValidator())->validate($this->accountFixture('alpha'));
 
         $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('usage endpoint request failed: network down');
+        $this->expectExceptionMessage('usage endpoint request failed after 3 attempt(s): network down');
 
         (new CodexUsageClient(baseUrl: 'https://chatgpt.com/backend-api', runtimeProfile: $this->runtimeProfile(), http: $http))->fetch($account);
     }

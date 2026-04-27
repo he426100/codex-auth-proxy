@@ -27,6 +27,7 @@ final class StreamErrorDetectorTest extends TestCase
     {
         self::assertTrue(StreamErrorDetector::isCompletedFrame("data: {\"type\":\"response.completed\"}\n\n"));
         self::assertTrue(StreamErrorDetector::isCompletedPayload('{"type":"response.done"}'));
+        self::assertTrue(StreamErrorDetector::isCompletedPayload('{"type":"response.failed","response":{"error":{"code":"previous_response_not_found"}}}'));
         self::assertFalse(StreamErrorDetector::isCompletedFrame("data: {\"type\":\"response.output_text.delta\"}\n\n"));
         self::assertFalse(StreamErrorDetector::isCompletedPayload('{"type":"response.output_text.delta"}'));
     }
@@ -54,5 +55,17 @@ final class StreamErrorDetectorTest extends TestCase
             StreamErrorDetector::jsonErrorStatus('{"error":{"code":"usage_limit_reached","status":"429"}}'),
         );
         self::assertNull(StreamErrorDetector::jsonErrorStatus('{"type":"response.completed"}'));
+    }
+
+    public function testDetectsResponseFailedAsTerminalErrorPayload(): void
+    {
+        $payload = '{"type":"response.failed","response":{"error":{"code":"previous_response_not_found","message":"missing","status":400}}}';
+
+        self::assertSame($payload, StreamErrorDetector::jsonErrorBody($payload));
+        self::assertSame(400, StreamErrorDetector::jsonErrorStatus($payload));
+        self::assertSame(
+            $payload,
+            StreamErrorDetector::errorBody("event: response.failed\ndata: {$payload}\n\n"),
+        );
     }
 }

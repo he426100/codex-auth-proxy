@@ -78,6 +78,31 @@ final class ErrorClassifierTest extends TestCase
         self::assertFalse($classification->hardSwitch());
     }
 
+    public function testClassifiesRequestTimeoutAsTransientError(): void
+    {
+        $classification = (new ErrorClassifier())->classify(408, 'request timeout', [], 1000);
+
+        self::assertSame('transient', $classification->type());
+        self::assertFalse($classification->hardSwitch());
+    }
+
+    public function testClassifiesPaymentRequiredAsHardSwitchError(): void
+    {
+        $classification = (new ErrorClassifier())->classify(402, '{"error":{"code":"payment_required"}}', [], 1000);
+
+        self::assertSame('payment', $classification->type());
+        self::assertTrue($classification->hardSwitch());
+        self::assertSame(2800, $classification->cooldownUntil());
+    }
+
+    public function testClassifiesModelCapacityAsQuotaError(): void
+    {
+        $classification = (new ErrorClassifier())->classify(400, '{"error":{"message":"Selected model is at capacity. Please try again later."}}', [], 1000);
+
+        self::assertSame('quota', $classification->type());
+        self::assertTrue($classification->hardSwitch());
+    }
+
     public function testClassifiesExplicitErrorPayloadWithoutHttpStatus(): void
     {
         $payload = '{"type":"error","error":{"message":"Your authentication token has been invalidated.","type":"invalid_request_error","code":"token_invalidated"}}';
@@ -109,5 +134,15 @@ final class ErrorClassifierTest extends TestCase
         self::assertSame('lineage', $classification->type());
         self::assertFalse($classification->hardSwitch());
         self::assertSame(0, $classification->cooldownUntil());
+    }
+
+    public function testClassifiesResponseFailedPayloadAsLineageError(): void
+    {
+        $payload = '{"type":"response.failed","response":{"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response not found.","param":"previous_response_id"}}}';
+
+        $classification = (new ErrorClassifier())->classify(200, $payload, [], 1000);
+
+        self::assertSame('lineage', $classification->type());
+        self::assertFalse($classification->hardSwitch());
     }
 }

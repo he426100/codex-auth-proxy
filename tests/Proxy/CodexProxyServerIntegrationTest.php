@@ -1058,7 +1058,7 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
-    public function testKeepsExistingWebSocketBindingBeforeStoredResponseAffinity(): void
+    public function testUsesStoredResponseAffinityBeforeExistingWebSocketBinding(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {
             self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
@@ -1124,15 +1124,14 @@ final class CodexProxyServerIntegrationTest extends TestCase
             });
 
             self::assertCount(1, $frames);
-            self::assertStringContainsString('response.failed', $frames[0]);
-            self::assertStringContainsString('previous_response_not_found', $frames[0]);
+            self::assertStringContainsString('resp_beta_next', $frames[0]);
 
             $attempts = $this->waitForJsonLines($captureFile, 1);
-            self::assertSame('acct-alpha', $attempts[0]['account_id']);
+            self::assertSame('acct-beta', $attempts[0]['account_id']);
 
             $state = $this->waitForJsonFile($home . '/state.json');
-            self::assertSame('acct-alpha', $state['sessions']['x-session-id:session-old-2']);
-            self::assertSame('new_session', $state['session_meta']['x-session-id:session-old-2']['selection_source'] ?? null);
+            self::assertSame('acct-beta', $state['sessions']['x-session-id:session-old-2']);
+            self::assertSame('rebind_response_affinity', $state['session_meta']['x-session-id:session-old-2']['selection_source'] ?? null);
         } finally {
             $this->stopProcess($proxy ?? null);
             $this->stopProcess($upstream ?? null);
@@ -1283,7 +1282,7 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
-    public function testKeepsReusedUpstreamWebSocketSessionBeforeStoredResponseAffinity(): void
+    public function testStoredResponseAffinityReopensUpstreamWebSocketWhenAccountChanges(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {
             self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
@@ -1349,15 +1348,14 @@ final class CodexProxyServerIntegrationTest extends TestCase
 
             self::assertCount(2, $frames);
             self::assertStringContainsString('resp_alpha_fresh', $frames[0]);
-            self::assertStringContainsString('response.failed', $frames[1]);
-            self::assertStringContainsString('previous_response_not_found', $frames[1]);
+            self::assertStringContainsString('resp_beta_next', $frames[1]);
 
             $attempts = $this->waitForJsonLines($captureFile, 2);
-            self::assertSame(['acct-alpha', 'acct-alpha'], array_column($attempts, 'account_id'));
+            self::assertSame(['acct-alpha', 'acct-beta'], array_column($attempts, 'account_id'));
 
             $state = $this->waitForJsonFile($home . '/state.json');
-            self::assertSame('acct-alpha', $state['sessions']['x-session-id:session-reuse-affinity']);
-            self::assertSame('new_session', $state['session_meta']['x-session-id:session-reuse-affinity']['selection_source'] ?? null);
+            self::assertSame('acct-beta', $state['sessions']['x-session-id:session-reuse-affinity']);
+            self::assertSame('rebind_response_affinity', $state['session_meta']['x-session-id:session-reuse-affinity']['selection_source'] ?? null);
         } finally {
             $this->stopProcess($proxy ?? null);
             $this->stopProcess($upstream ?? null);
@@ -2685,7 +2683,7 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
-    public function testReusesUpstreamWebSocketAcrossDownstreamReconnectForSameSession(): void
+    public function testIsolatesUpstreamWebSocketAcrossDownstreamReconnectForSameSession(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {
             self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
@@ -2752,14 +2750,15 @@ final class CodexProxyServerIntegrationTest extends TestCase
 
             self::assertCount(2, $frames);
             self::assertStringContainsString('resp_ws_conn_1_msg_1', $frames[0]);
-            self::assertStringContainsString('resp_ws_conn_1_msg_2', $frames[1]);
+            self::assertStringContainsString('resp_ws_conn_2_msg_1', $frames[1]);
 
-            $attempts = $this->waitForJsonLines($captureFile, 3);
+            $attempts = $this->waitForJsonLines($captureFile, 4);
             self::assertSame('open', $attempts[0]['event']);
             self::assertSame('message', $attempts[1]['event']);
-            self::assertSame('message', $attempts[2]['event']);
+            self::assertSame('open', $attempts[2]['event']);
+            self::assertSame('message', $attempts[3]['event']);
             self::assertSame(1, $attempts[1]['connection_index']);
-            self::assertSame(1, $attempts[2]['connection_index']);
+            self::assertSame(2, $attempts[3]['connection_index']);
         } finally {
             $this->stopProcess($proxy ?? null);
             $this->stopProcess($upstream ?? null);
@@ -3033,7 +3032,7 @@ final class CodexProxyServerIntegrationTest extends TestCase
         }
     }
 
-    public function testReusesUpstreamWebSocketAcrossTurnStateChangesWhenStableSessionIdExists(): void
+    public function testIsolatesUpstreamWebSocketAcrossTurnStateChangesWhenStableSessionIdExists(): void
     {
         if (!extension_loaded('swoole') || !function_exists('proc_open')) {
             self::markTestSkipped('Swoole and proc_open are required for proxy integration tests');
@@ -3102,14 +3101,15 @@ final class CodexProxyServerIntegrationTest extends TestCase
 
             self::assertCount(2, $frames);
             self::assertStringContainsString('resp_ws_conn_1_msg_1', $frames[0]);
-            self::assertStringContainsString('resp_ws_conn_1_msg_2', $frames[1]);
+            self::assertStringContainsString('resp_ws_conn_2_msg_1', $frames[1]);
 
-            $attempts = $this->waitForJsonLines($captureFile, 3);
+            $attempts = $this->waitForJsonLines($captureFile, 4);
             self::assertSame('open', $attempts[0]['event']);
             self::assertSame('message', $attempts[1]['event']);
-            self::assertSame('message', $attempts[2]['event']);
+            self::assertSame('open', $attempts[2]['event']);
+            self::assertSame('message', $attempts[3]['event']);
             self::assertSame(1, $attempts[1]['connection_index']);
-            self::assertSame(1, $attempts[2]['connection_index']);
+            self::assertSame(2, $attempts[3]['connection_index']);
         } finally {
             $this->stopProcess($proxy ?? null);
             $this->stopProcess($upstream ?? null);

@@ -28,7 +28,7 @@ final class SchedulerTest extends TestCase
         self::assertSame('acct-alpha', $second->accountId());
     }
 
-    public function testKeepsStableSessionBindingBeforeResponseAffinity(): void
+    public function testResponseAffinityOverridesStableSessionBinding(): void
     {
         $validator = new AccountFileValidator();
         $accounts = [
@@ -43,11 +43,11 @@ final class SchedulerTest extends TestCase
         $selection = [];
         $account = $scheduler->accountForSession('thread-1', null, $selection, 'acct-beta');
 
-        self::assertSame('acct-alpha', $account->accountId());
-        self::assertSame('bound_session', $selection['source']);
+        self::assertSame('acct-beta', $account->accountId());
+        self::assertSame('rebind_response_affinity', $selection['source']);
         self::assertSame([
-            'account_id' => 'acct-alpha',
-            'selection_source' => 'new_session',
+            'account_id' => 'acct-beta',
+            'selection_source' => 'rebind_response_affinity',
             'bound_at' => 1000,
             'last_seen_at' => 1000,
         ], $state->sessionBinding('thread-1'));

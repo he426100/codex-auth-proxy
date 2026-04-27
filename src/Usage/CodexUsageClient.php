@@ -27,6 +27,7 @@ final class CodexUsageClient implements UsageClient
         ?UsageResponseParser $parser = null,
         private readonly int $timeoutSeconds = 30,
         private readonly array $proxyEnv = [],
+        private readonly int $maxAttempts = 3,
         ?ClientInterface $http = null,
     ) {
         $this->proxy = $this->proxyOptions();
@@ -45,15 +46,7 @@ final class CodexUsageClient implements UsageClient
 
     public function fetch(CodexAccount $account): AccountUsage
     {
-        try {
-            $response = $this->http->request('GET', $this->usageEndpoint(), [
-                'headers' => $this->headers($account),
-                'http_errors' => false,
-                'proxy' => $this->proxy,
-            ]);
-        } catch (GuzzleException $exception) {
-            throw new RuntimeException('usage endpoint request failed: ' . $exception->getMessage(), 0, $exception);
-        }
+        $response = $this->requestWithRetry($account);
 
         $status = $response->getStatusCode();
         $body = (string) $response->getBody();
@@ -67,6 +60,50 @@ final class CodexUsageClient implements UsageClient
         }
 
         return $this->parser->parse($decoded);
+    }
+
+    private function requestWithRetry(CodexAccount $account): ResponseInterface
+    {
+        $attempts = max(1, $this->maxAttempts);
+        $lastException = null;
+        $lastResponse = null;
+
+        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
+            try {
+                $response = $this->http->request('GET', $this->usageEndpoint(), [
+                    'headers' => $this->headers($account),
+                    'http_errors' => false,
+                    'proxy' => $this->proxy,
+                ]);
+            } catch (GuzzleException $exception) {
+                $lastException = $exception;
+                if ($attempt < $attempts) {
+                    continue;
+                }
+
+                break;
+            }
+
+            if ($response->getStatusCode() < 500 || $attempt >= $attempts) {
+                return $response;
+            }
+
+            $lastResponse = $response;
+        }
+
+        if ($lastResponse instanceof ResponseInterface) {
+            return $lastResponse;
+        }
+
+        if ($lastException instanceof GuzzleException) {
+            throw new RuntimeException(
+                'usage endpoint request failed after ' . $attempts . ' attempt(s): ' . $lastException->getMessage(),
+                0,
+                $lastException,
+            );
+        }
+
+        throw new RuntimeException('usage endpoint request failed');
     }
 
     /** @return array<string,string> */

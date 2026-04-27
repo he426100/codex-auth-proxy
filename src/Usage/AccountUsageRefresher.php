@@ -41,7 +41,10 @@ final class AccountUsageRefresher
                     throw new \RuntimeException('usage endpoint returned incomplete Codex rate limit snapshot');
                 }
                 $state->setAccountUsage($account->accountId(), CachedAccountUsage::fromLive($usage, $checkedAt));
-                $state->setCooldownUntil($account->accountId(), 0);
+                $cooldownReason = $state->cooldownReason($account->accountId());
+                if ($cooldownReason === null || in_array($cooldownReason, ['quota', 'usage', 'usage_exhausted'], true)) {
+                    $state->setCooldownUntil($account->accountId(), 0);
+                }
                 $summary['success']++;
             } catch (Throwable $throwable) {
                 $state->setAccountUsageError($account->accountId(), $throwable->getMessage(), $checkedAt);

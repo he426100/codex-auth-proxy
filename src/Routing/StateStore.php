@@ -147,6 +147,44 @@ final class StateStore
         });
     }
 
+    public function markSessionLineage(string $sessionKey, string $accountId, ?string $responseId = null, ?int $seenAt = null): void
+    {
+        $this->update(function (array &$state) use ($sessionKey, $accountId, $responseId, $seenAt): void {
+            if ($sessionKey === '' || $accountId === '') {
+                return;
+            }
+            if (!isset($state['sessions'][$sessionKey]) || !is_string($state['sessions'][$sessionKey]) || $state['sessions'][$sessionKey] === '') {
+                return;
+            }
+            if (!isset($state['session_meta']) || !is_array($state['session_meta'])) {
+                $state['session_meta'] = [];
+            }
+
+            $meta = isset($state['session_meta'][$sessionKey]) && is_array($state['session_meta'][$sessionKey])
+                ? $state['session_meta'][$sessionKey]
+                : [];
+            $meta['lineage_account_id'] = $accountId;
+            $meta['lineage_seen_at'] = $seenAt !== null && $seenAt > 0 ? $seenAt : time();
+            if ($responseId !== null && $responseId !== '') {
+                $meta['lineage_response_id'] = $responseId;
+            }
+            $state['session_meta'][$sessionKey] = $meta;
+        });
+    }
+
+    public function sessionLineageAccount(string $sessionKey): ?string
+    {
+        $this->reload();
+        $meta = $this->state['session_meta'][$sessionKey] ?? null;
+        if (!is_array($meta)) {
+            return null;
+        }
+
+        $accountId = $meta['lineage_account_id'] ?? null;
+
+        return is_string($accountId) && $accountId !== '' ? $accountId : null;
+    }
+
     public function forgetSession(string $sessionKey): bool
     {
         $forgotten = false;
